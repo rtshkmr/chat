@@ -1,0 +1,17 @@
+#+title: Progress Notes
+
+This org-file aims to document progress formatively in 3 areas:
+
+1. Design Decisions
+   - tradeoffs faced and balancing them
+   - omissions and shortcuts
+2. Knowledge Gaps and Learnings
+   - ecosystem and tooling takeaways
+   - unique problems / bugs faced as a side-effect of implementation decisions
+3. Future Extension Considerations
+   - available evolution paths for the current code
+   -----
+
+* Design Decisions
+* Knowledge Gaps and Learnings
+* Future Extension Considerations
