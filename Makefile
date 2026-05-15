@@ -1,4 +1,4 @@
-.PHONY: build test clean utop fmt watch dev install doc
+.PHONY: build test clean utop fmt watch dev install doc run
 
 build:
 	dune build
@@ -26,3 +26,6 @@ install:
 
 doc:
 	dune build @doc
+
+run:
+	dune exec ./bin/main.exe -- $(filter-out $@,$(MAKECMDGOALS))

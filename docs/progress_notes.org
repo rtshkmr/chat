@@ -12,6 +12,12 @@ This org-file aims to document progress formatively in 3 areas:
    - available evolution paths for the current code
    -----
 
+* Tooling Choices
+** Concurrency: use =Lwt= first, if all goes right, it should be possible to demo the migration to =Eio=
+- I'm equally green when it comes to both. Given that the community seems to be tending towards effects based io, it makes sense to also gain the ability to do a migration from =Lwt= to =Eio=.
+- A cursory check implies that their cancellation semantics will be different since one is about cooperative concurrency and the other is structured concurrency
+  - therefore, I should try to avoid making the cancelling logic too integrated with =Lwt=-style
+
 * Design Decisions
 * Knowledge Gaps and Learnings
 * Future Extension Considerations

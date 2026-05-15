@@ -1,2 +1,5 @@
 (library
- (name chat))
+ (name chat)
+ (libraries lwt lwt.unix logs cmdliner)
+ (preprocess
+  (pps lwt_ppx)))

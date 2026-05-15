@@ -23,6 +23,9 @@
   "This is my implementation for the takehome assessment given by Ahrefs Pte. Ltd. for the OCaml Developer role")
  (depends
   ocaml
+  lwt
+  logs
+  cmdliner
   (alcotest :with-test)
   (ocaml-lsp-server :with-dev)
   (merlin :with-dev)
