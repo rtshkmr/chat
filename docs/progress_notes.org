@@ -19,5 +19,74 @@ This org-file aims to document progress formatively in 3 areas:
   - therefore, I should try to avoid making the cancelling logic too integrated with =Lwt=-style
 
 * Design Decisions
+** multi-thread (loop routines) need sound coordination
+Both the server and client have a routine that eventually needs to do a bunch of independent tasks without the tasks blocking each other.
+
+For example,  the server starts by entering an =accept_loop=, given a live socket. This loop has a handler thunk which is responsible for handling clients concurrently (=handle_client_conc=). This is where we see the 3 independent tasks, which are 3 loops of their own:
+ 1. =read_stdin_loop=: reads user input
+ 2. =read_socket_loop=: reads from network
+ 3. =write_socket_loop=: writes to network
+
+The loops have a ordering/logical dependency between them, that's why there's a need to handle the coordination between these threads --- which is why we need to be reliant on some *shared state*.
+
+=Lwt= is cooperative, so no preemption worries to care about -- only need to think about coordination at the queue boundary.
+
+
+*** Option A: using a =Lwt_mvar=
+It's the simplest example, it's a single [[https://ocaml.github.io/odoc/lwt/lwt/Lwt_mvar/index.html][mailbox variable]]  that we can use for sync b/w the threads and in this commit it's essentially a "Message" -- whatever that came from the TCP socket.
+
+Single-slot means =read_stdin_loop= blocks on =put= until =write_socket_loop=
+calls =take=.
+
+- Possible Issues:
+  * Single-slot coupling between stdin and socket writes
+  * If user types fast while network is slow, =put= blocks and typing freezes
+  * Won't work for queuing multiple messages ahead of time
+- Possible benefits:
+  - Idiomatic Lwt
+  - Creates natural backpressure: if network is slow, typing feels slow too (arguably good UX)
+  - Good enough for human typing speed
+
+*** Option B: using a =Lwt_stream=
+Stream semantics, likely lazy operations as well. Non-blocking =push=. Decouples =stdin= from socket I/O completely.
+
+- Possible Issues:
+  * no explicit buffering, the stream would be unbounded
+  * Internal buffering is implicit, harder to debug  -- not sure if it's bounded or unbounded queue, seems like it's lazy ops
+  * can't add backpressure later to effect on UX later
+
+- Possible benefits:
+  - Push never blocks
+  - Can handle bursts of messages
+  - Scales to multiple producers/consumers later for extensions
+
+*** Option C: Explicit Buffering  using a Bounded Queue
+This involves us using a queue, but queues are not threadsafe so there's a need to handroll the sync for it.
+
+- Possible Issues:
+  * Needs explicit sync mechanisms --- complex code
+  * might be more error-prone
+  * probably no need for 1:1 chat app
+
+- Possible benefits:
+  - We will have control over the capacity of the queue
+  - Can tune the backpressure manually
+
+- unknowns:
+  - are there Atomic queues or atomic vars that we can use together with Lwt? would be nice to have an atomic queue for the messages then we'd not need explicit sync via conditions or mutex
+
+*** Option D: Using an Unbounded Queue
+This is like the queue before but without a max capacity. Like a limitless buffer.
+
+- Possible Issues:
+  * unbounded memory feels like a possible source of memory leaks if rate of producing to the buffer more than rate of consuming from the buffer
+
+- Possible benefits:
+  - simple, putting into the queue will never block
+  - stdin and socket writes are completely independent
+*** Current Decision
+For this POC, option A is good enough, but I might consider a bufferred queue because bufferred mechanics feel right in such a case of inter-thread coordination.
+
+
 * Knowledge Gaps and Learnings
 * Future Extension Considerations
