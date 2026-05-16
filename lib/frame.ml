@@ -1,0 +1,80 @@
+type msg_id = int32
+
+type t =
+  | Msg of { id : msg_id; payload : bytes }
+  | Ack of { id : msg_id }
+  | Close
+
+type error = Header_too_short | Payload_too_short | Unknown_frame_type of int
+
+exception Frame_error of error
+
+let error_to_string = function
+  | Header_too_short -> "Frame header too short"
+  | Payload_too_short -> "Frame payload incomplete"
+  | Unknown_frame_type tag -> Printf.sprintf "Unknown frame type: %d" tag
+
+let type_of = function Msg _ -> 0 | Ack _ -> 1 | Close -> 2
+let payload_of = function Msg { payload; _ } -> payload | _ -> Bytes.empty
+
+(** Headers are fixed size, [ 9B = <1B type><4B msg_id><4B payload_length> ] *)
+let header_sz = 9
+
+(* position offsets *)
+let frame_payload_off = header_sz
+let frame_typ_off = 0
+let frame_id_off = 1
+let frame_payload_sz_off = 5
+
+type header_meta = {
+  typ : int; (* 1-byte type tag *)
+  id : msg_id; (* 4-byte message id *)
+  payload_sz : int; (* variable, needs calculation *)
+}
+
+let header_meta_of t =
+  match t with
+  | Msg { id; payload } ->
+      let payload_sz = payload |> Bytes.length in
+      { typ = type_of t; id; payload_sz }
+  | Ack { id } -> { typ = type_of t; id; payload_sz = 0 }
+  | Close -> { typ = type_of t; id = 0l; payload_sz = 0 }
+
+let to_bytes t =
+  let { typ; id; payload_sz } = header_meta_of t in
+  let frame = header_sz + payload_sz |> Bytes.create in
+  Bytes.set_uint8 frame frame_typ_off typ;
+  Bytes.set_int32_be frame frame_id_off id;
+  Bytes.set_int32_be frame frame_payload_sz_off (Int32.of_int payload_sz);
+  Bytes.blit (payload_of t) 0 frame frame_payload_off payload_sz;
+  frame
+
+let parse_header_meta bs =
+  if Bytes.length bs < header_sz then Error Header_too_short
+  else
+    Ok
+      {
+        typ = Bytes.get_uint8 bs frame_typ_off;
+        id = Bytes.get_int32_be bs frame_id_off;
+        payload_sz = Bytes.get_int32_be bs frame_payload_sz_off |> Int32.to_int;
+      }
+
+let make_frame typ id payload =
+  match typ with
+  | 0 -> Ok (Msg { id; payload })
+  | 1 -> Ok (Ack { id })
+  | 2 -> Ok Close
+  | tag -> Error (Unknown_frame_type tag)
+
+let of_bytes bs =
+  match parse_header_meta bs with
+  | Error e -> Error e
+  | Ok header ->
+      if Bytes.length bs < header_sz + header.payload_sz then
+        Error Payload_too_short
+      else
+        let payload =
+          if header.payload_sz = 0 then Bytes.empty
+          else Bytes.sub bs header_sz header.payload_sz
+        in
+        make_frame header.typ header.id payload
