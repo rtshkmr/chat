@@ -86,7 +86,10 @@ This is like the queue before but without a max capacity. Like a limitless buffe
   - stdin and socket writes are completely independent
 *** Current Decision
 For this POC, option A is good enough, but I might consider a bufferred queue because bufferred mechanics feel right in such a case of inter-thread coordination.
-
-
+** TODO Different Ways to Define Frames
+** TODO Session as coordinator of all network IO
+** TODO Decoupling user IO and network IO
+*** ownership of the stdin read loop
+*** ownership of slash-command parsing
 * Knowledge Gaps and Learnings
 * Future Extension Considerations
