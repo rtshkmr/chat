@@ -88,8 +88,35 @@ This is like the queue before but without a max capacity. Like a limitless buffe
 For this POC, option A is good enough, but I might consider a bufferred queue because bufferred mechanics feel right in such a case of inter-thread coordination.
 ** TODO Different Ways to Define Frames
 ** TODO Session as coordinator of all network IO
-** TODO Decoupling user IO and network IO
+** TODO Decoupling user IO (Console) and network IO (Session)
 *** ownership of the stdin read loop
+*** decoupling rationale
+temp note:
+#+begin_quote
+I see the merits of NOT creating an App module yet and wiring that up. At the same time, I do think that user interactions currently deserves its own module because:
+
+   i) yes it's 2 loops, an io pair but it's also:
+
+   ii) implementing logic for capturing user events --- via slash commands (e.g. `/quit`)  and via keypresses. These listeners are unique in the sense that other areas of the codebase doesn't have such listeners. Firstly, I don't know yet what's a good pattern to have two loops running and to attach multiple listeners to the input loop yet. This also makes it clear that only this user interaction specific module will use the frame-codec also, so it's going to be in charge of the codec edge cases as well. Therefore, I see this as substantial logic. I'm not sure about the naming of this module yet, maybe `User_interaction.ml` or something better might work here. It shall also employ the callback patterns like the session module and everything is still decoupled well
+
+  iii) I'm not really worried about code duplication, the problem is more that I don't want to make a module messy (in this case server / client) by adding in substantial amounts of code that overloads its responsibilities. In this case there's a clear responsibiilty boundary for user interactions.
+#+end_quote
 *** ownership of slash-command parsing
+*** lifecycle dependency console (@ app-level) vs session (@ connection-level) $\implies$ binding-pattern
+- the callback registrations that the two may "share" happens via a =bind= function
+  - module skeleton vs hydration point is separated
+
+          hydration point referring to the callback bindings
+
+  - the hydration point is a singular, concentrated area where stateful actions happen (a single wiring point) -- cleaner mutation boundary
+
+  - whether currently in a session or not is now implicit
+
+- the chicken and egg situation is a consequence of the framing that console MAY outlive session --- not a need for v0 but it keeps the lifecycle decisions clean without adding complexity and allowing clean evolution paths into an app where a user may use slash commands to reconnect / connect to different server...
+*** channel creator should be responsible for it's fini logic also and how that plays into DI and RAII intuitions
+** TODO NOT using a TUI, line-based buffering @ Console
+UI Layer (Future): Single-line input via readline in v0.
+
+Multi-line and advanced terminal features (message history rendering, status bar) can be implemented via a Notty-based UI module as a drop-in replacement.
 * Knowledge Gaps and Learnings
 * Future Extension Considerations

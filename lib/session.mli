@@ -5,7 +5,7 @@
     Since a chat-connection is stateful, the session keeps track of [ msg_id ]
     and [ pending_acks ] as well.*)
 
-type callbacks = {
+type console_rx_callbacks = {
   on_rx_msg : bytes -> unit Lwt.t;
       (** Fires when a message frame is received. Session automatically sends an
           ACK msg. *)
@@ -17,16 +17,23 @@ type callbacks = {
           Session calculates RTT from pending-ack table. *)
   on_rx_close : unit -> unit Lwt.t;  (** Fires when rx a Close frame. *)
 }
-(** Callbacks for incoming events *)
+(** Callbacks from the console to be fired on different rx events *)
 
 type t
 
 val create :
   ic:Lwt_io.input_channel ->
   oc:Lwt_io.output_channel ->
-  callbacks:callbacks ->
+  callbacks:console_rx_callbacks option ->
+  on_kill:(unit -> unit Lwt.t) ->
   t
 (** Create a session. Does not start I/O until [run] is called. *)
+
+val set_callbacks : t -> console_rx_callbacks -> t
+(** Hydrates the session by setting the console-specific callbacks that the
+    session needs to have access to.*)
+
+val unset_callbacks : t -> t
 
 val kill : t -> unit Lwt.t
 (** Kills a session gracefully *)

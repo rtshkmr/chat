@@ -1,7 +1,7 @@
 open Lwt
 open Lwt.Infix
 
-type callbacks = {
+type console_rx_callbacks = {
   on_rx_msg : bytes -> unit Lwt.t;
   on_rx_ack : Frame.msg_id -> float -> unit Lwt.t;
   on_rx_close : unit -> unit Lwt.t;
@@ -16,7 +16,13 @@ type state = {
 type t = {
   ic : Lwt_io.input_channel;
   oc : Lwt_io.output_channel;
-  callbacks : callbacks;
+  on_kill : unit -> unit Lwt.t;
+  callbacks : console_rx_callbacks option;
+      (** TODO: the fact that it is an optional now means that we need to add in
+          an exception because an invariant to maintain here is that there's
+          NEVER a case when we try to invoke any callback when it's empty. This
+          is because the console will always outlive a session, so it should
+          always be available to hydrate the session *)
   state : state;
 }
 
@@ -27,9 +33,12 @@ let init_state () =
     msg_queue = Lwt_mvar.create_empty ();
   }
 
-let create ~ic ~oc ~callbacks =
+let create ~ic ~oc ~callbacks ~on_kill =
   let state = init_state () in
-  { ic; oc; callbacks; state }
+  { ic; oc; callbacks; state; on_kill }
+
+let set_callbacks t cbs = { t with callbacks = Some cbs }
+let unset_callbacks t = { t with callbacks = None }
 
 let send_message { state = { msg_queue } } payload =
   Lwt_mvar.put msg_queue payload
@@ -60,7 +69,7 @@ let tx_loop { oc; state = { msg_queue; _ }; _ } =
   in
   loop ()
 
-(* TODO: create custom lwt errors to be handled, offer a fini function for clean state teardowns  *)
+(* TODO: create custom lwt errors to be handled*)
 let handle_network_io t =
   try%lwt Lwt.join [ rx_loop t; tx_loop t ]
   with e ->
@@ -69,14 +78,17 @@ let handle_network_io t =
     in
     Lwt.fail e
 
-let kill { ic; oc; callbacks = { on_rx_close; _ }; _ } =
-  let%lwt () = Lwt_io.close ic in
-  let%lwt () = Lwt_io.close oc in
-  let%lwt () = on_rx_close () in
-  Lwt_io.printl "[Session cleaned up]"
+let kill { on_kill; callbacks; _ } =
+  let on_rx_close =
+    match callbacks with
+    | Some cb -> cb.on_rx_close
+    | None -> fun () -> Lwt.return_unit
+  in
+  on_rx_close () >>= fun () ->
+  on_kill () >>= fun () -> Lwt_io.printl "[Session cleaned up]"
 
 let run t =
-  let%lwt () = Lwt_io.printl "Running session..." in
+  Lwt_io.printl "Running session..." >>= fun () ->
   let thunk = fun () -> handle_network_io t in
   let cleaner_thunk = fun () -> kill t in
   Lwt.finalize thunk cleaner_thunk
