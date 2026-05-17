@@ -14,8 +14,6 @@ type t = {
   listeners : listener list ref;
 }
 
-let listeners : listener list ref = ref []
-
 let dispatch_event t e =
   Lwt_list.iter_p (fun listener -> listener e) !(t.listeners)
 
@@ -69,10 +67,17 @@ let create ~ic ~oc ~on_kill =
   let c = { session = None; listeners = ref []; ic; oc; on_kill } in
   init_console c
 
+let make_console_rx_callbacks { oc; _ } =
+  let on_rx_msg bs = Lwt_io.write_from_exactly oc bs 0 (Bytes.length bs) in
+  let on_rx_close () = Lwt_io.printl "Your peer has left the chat" in
+  let on_rx_ack id rtt = Lwt_io.printlf "Msg %ld Acked w rtt = %f" id rtt in
+  { Session.on_rx_msg; on_rx_ack; on_rx_close }
+
 let bind_session t ~session =
-  t.session <- Some session;
+  let s = t |> make_console_rx_callbacks |> Session.set_callbacks session in
+  t.session <- Some s;
   let session_listeners =
-    List.map (fun factory -> factory session) session_listener_factories
+    List.map (fun factory -> factory s) session_listener_factories
   in
   register_listeners t session_listeners
 

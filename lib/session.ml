@@ -17,7 +17,7 @@ type t = {
   ic : Lwt_io.input_channel;
   oc : Lwt_io.output_channel;
   on_kill : unit -> unit Lwt.t;
-  callbacks : console_rx_callbacks option;
+  callbacks : console_rx_callbacks option ref;
       (** TODO: the fact that it is an optional now means that we need to add in
           an exception because an invariant to maintain here is that there's
           NEVER a case when we try to invoke any callback when it's empty. This
@@ -35,10 +35,15 @@ let init_state () =
 
 let create ~ic ~oc ~callbacks ~on_kill =
   let state = init_state () in
-  { ic; oc; callbacks; state; on_kill }
+  { ic; oc; callbacks = ref callbacks; state; on_kill }
 
-let set_callbacks t cbs = { t with callbacks = Some cbs }
-let unset_callbacks t = { t with callbacks = None }
+let set_callbacks t cbs =
+  t.callbacks := Some cbs;
+  t
+
+let unset_callbacks t =
+  t.callbacks := None;
+  t
 
 let send_message { state = { msg_queue } } payload =
   Lwt_mvar.put msg_queue payload
@@ -55,6 +60,7 @@ let rx_loop { ic; _ } =
     | Some line_str ->
         (* let bs = Bytes.of_string line_str in *)
         let%lwt () = Lwt_io.printlf "<client>: %s\n" line_str in
+        (* TODO: wire up the rx callbacks here, after frame parsing is done *)
         loop ()
   in
   loop ()
@@ -80,7 +86,7 @@ let handle_network_io t =
 
 let kill { on_kill; callbacks; _ } =
   let on_rx_close =
-    match callbacks with
+    match !callbacks with
     | Some cb -> cb.on_rx_close
     | None -> fun () -> Lwt.return_unit
   in

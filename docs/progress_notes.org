@@ -113,7 +113,10 @@ I see the merits of NOT creating an App module yet and wiring that up. At the sa
   - whether currently in a session or not is now implicit
 
 - the chicken and egg situation is a consequence of the framing that console MAY outlive session --- not a need for v0 but it keeps the lifecycle decisions clean without adding complexity and allowing clean evolution paths into an app where a user may use slash commands to reconnect / connect to different server...
+
+- so it's natural to end up with a 2-phased init for this
 *** channel creator should be responsible for it's fini logic also and how that plays into DI and RAII intuitions
+** TODO Supervision and future Supervision Strats
 ** TODO NOT using a TUI, line-based buffering @ Console
 UI Layer (Future): Single-line input via readline in v0.
 

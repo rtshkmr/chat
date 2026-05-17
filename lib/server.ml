@@ -10,98 +10,84 @@
       i) invariant violations -- assertions maybe
      ii) resource exhaustion that can't be handled
 *)
+(* FIXME: [1] there's an issue here that console run should be running for the
+    whole server's lifetime. The problem here is that we're calling Console.run
+    here again, it shouldn't be the case because we just need to call
+    Console.run once. *)
+(* FIXME: [2] Server lifecycle on EOF
+
+   Currently, if the server operator presses Ctrl-D (EOF on stdin), the console
+   reads End_of_file, Console.run exits, which calls on_kill_console and closes
+   stdin/stdout. This is acceptable for now (interpreted as "server shutdown
+   signal"), but we should handle it more explicitly:
+
+   Option 1: Catch EOF in Console.run and return gracefully without calling on_kill
+   Option 2: Add a /shutdown command and ignore EOF
+   Option 3: Treat EOF as a signal to close all connections and exit cleanly
+
+   For now, we rely on the /quit command for controlled shutdown and defer this problem.
+*)
 open Lwt
 open Lwt.Infix
 
-let read_stdin_loop queue =
-  let rec loop () =
-    let%lwt line = Lwt_io.read_line Lwt_io.stdin in
-    let%lwt () = Lwt_mvar.put queue line in
-    loop ()
+let close_io_channels ic oc = Lwt_io.close ic >>= fun () -> Lwt_io.close oc
+
+let make_console_on_kill ~console_ic ~console_oc =
+ fun () ->
+  close_io_channels console_ic console_oc >>= fun () ->
+  Lwt_io.printl "[Disconnected from console]"
+
+let make_net_on_kill ~net_ic ~net_oc =
+ fun () ->
+  close_io_channels net_ic net_oc >>= fun () ->
+  Lwt_io.printl "[Disconnected from network]"
+
+let init_server_socket ~port ~bind =
+  let%lwt () =
+    Lwt_io.printlf "Starting server, to listen on %s:%d\n" bind port
   in
-  loop ()
-
-let read_socket_loop input =
-  let rec loop () =
-    let%lwt line_opt = Lwt_io.read_line_opt input in
-    match line_opt with
-    | None ->
-        (* Socket closed *)
-        let%lwt () = Lwt_io.printl "[Connection closed by peer]" in
-        Lwt.fail End_of_file
-    | Some line ->
-        let%lwt () = Lwt_io.printlf "<client>: %s\n" line in
-        loop ()
-  in
-  loop ()
-
-let write_socket_loop output queue =
-  let rec loop () =
-    let%lwt line = Lwt_mvar.take queue in
-    let%lwt () = Lwt_io.write_line output line in
-    let%lwt () = Lwt_io.flush output in
-    loop ()
-  in
-  loop ()
-
-let handle_client_conc input output =
-  let queue = Lwt_mvar.create_empty () in
-  try%lwt
-    Lwt.join
-      [
-        read_stdin_loop queue;
-        read_socket_loop input;
-        write_socket_loop output queue;
-      ]
-  with
-  | End_of_file ->
-      let%lwt () = Lwt_io.printl "[EOF: Connection terminated]" in
-      Lwt.return ()
-  | Unix.Unix_error (err, _, _) ->
-      let%lwt () =
-        Lwt_io.eprintf "Socket error: %s\n" (Unix.error_message err)
-      in
-      Lwt.fail (Failure (Unix.error_message err))
-  | e ->
-      let%lwt () =
-        Lwt_io.eprintf "Unexpected error: %s\n" (Printexc.to_string e)
-      in
-      Lwt.fail e
-
-let rec accept_loop server_socket =
-  let%lwt client_socket, _client_addr = Lwt_unix.accept server_socket in
-
-  let input = Lwt_io.of_fd ~mode:Lwt_io.input client_socket in
-  let output = Lwt_io.of_fd ~mode:Lwt_io.output client_socket in
-
-  let%lwt () = Lwt_io.printlf "Client connected\n" in
-  let handler_thunk = fun () -> handle_client_conc input output in
-  let cleaner_thunk =
-   fun () ->
-    let%lwt () = Lwt_io.close input in
-    let%lwt () = Lwt_io.close output in
-    Lwt_io.printl "Client cleaned up"
-  in
-  Lwt.finalize handler_thunk cleaner_thunk >>= fun () ->
-  Lwt_io.printl "Waiting for next client..." >>= fun () ->
-  accept_loop server_socket
-
-let start_server port bind =
-  let backlog_capacity = 1 in
-  let inet_addr =
-    try Unix.inet_addr_of_string bind
-    with _ -> failwith (Printf.sprintf "Invalid bind address: %s" bind)
-  in
+  let inet_addr = Unix.inet_addr_of_string bind in
   let sockaddr = Unix.(ADDR_INET (inet_addr, port)) in
-  let server_socket = Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-  Lwt_unix.setsockopt server_socket Unix.SO_REUSEADDR true;
+  let server_socket = Lwt_unix.socket PF_INET SOCK_STREAM 0 in
   let%lwt () = Lwt_unix.bind server_socket sockaddr in
-  Lwt_unix.listen server_socket backlog_capacity;
-  let%lwt () = Lwt_io.printlf "Server started on %s:%d\n" bind port in
-  accept_loop server_socket
+  Lwt_unix.listen server_socket 1;
+  let%lwt () = Lwt_io.printlf "Server listening on %s:%d\n" bind port in
+  Lwt.return server_socket
+
+let init_console () =
+  let console_ic = Lwt_io.stdin in
+  let console_oc = Lwt_io.stdout in
+  let on_kill_console = make_console_on_kill ~console_ic ~console_oc in
+  Console.create ~ic:console_ic ~oc:console_oc ~on_kill:on_kill_console
+
+let handle_client_connection console client_socket =
+  let net_ic = Lwt_io.of_fd ~mode:Lwt_io.input client_socket in
+  let net_oc = Lwt_io.of_fd ~mode:Lwt_io.output client_socket in
+  let on_kill_net = make_net_on_kill ~net_ic ~net_oc in
+  let session =
+    Session.create ~ic:net_ic ~oc:net_oc ~on_kill:on_kill_net ~callbacks:None
+  in
+  let console = Console.bind_session console ~session in
+  let thunk = fun () -> Lwt.join [ Session.run session; Console.run console ] in
+  let session_cleaner_thunk = fun () -> Session.kill session in
+
+  let%lwt () = Lwt.finalize thunk session_cleaner_thunk in
+  let console = Console.unbind_session console in
+  let%lwt () = Lwt_io.printl "Waiting for next client..." in
+  Lwt.return console
+
+(* TODO handle custom errors for known cases *)
+(* TODO start server needs a finalizer, so that console can be killed properly *)
+let start_server port bind =
+  let%lwt server_socket = init_server_socket ~port ~bind in
+  let rec accept_loop console =
+    let%lwt client_socket, _addr = Lwt_unix.accept server_socket in
+    let%lwt console = handle_client_connection console client_socket in
+    accept_loop console
+  in
+  init_console () |> accept_loop
 
 let run ~port ~bind ~timeout ~log_level =
-  let%lwt () = Lwt_io.printlf "Starting server on %s:%d\n" bind port in
   try%lwt start_server port bind
   with e ->
     let%lwt () = Lwt_io.eprintf "Server error: %s\n" (Printexc.to_string e) in
