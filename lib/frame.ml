@@ -5,6 +5,27 @@ type t =
   | Ack of { id : msg_id }
   | Close
 
+type frame_format_info = {
+  frame_header_sz : int;
+  frame_payload_off : int;
+  frame_type_off : int;
+  frame_id_off : int;
+  frame_payload_sz_off : int;
+}
+(** Frame Headers are fixed size,
+    [ 9B = <1B type><4B msg_id><4B payload_length> ] *)
+let frame_header_sz = 9
+let frame_format =
+  {
+    frame_header_sz;
+    frame_payload_off = frame_header_sz;
+    frame_type_off = 0;
+    frame_id_off = 1;
+    frame_payload_sz_off = 5;
+  }
+
+let fmt = frame_format
+
 type error = Header_too_short | Payload_too_short | Unknown_frame_type of int
 
 exception Frame_error of error
@@ -16,15 +37,6 @@ let error_to_string = function
 
 let type_of = function Msg _ -> 0 | Ack _ -> 1 | Close -> 2
 let payload_of = function Msg { payload; _ } -> payload | _ -> Bytes.empty
-
-(** Headers are fixed size, [ 9B = <1B type><4B msg_id><4B payload_length> ] *)
-let header_sz = 9
-
-(* position offsets *)
-let frame_payload_off = header_sz
-let frame_typ_off = 0
-let frame_id_off = 1
-let frame_payload_sz_off = 5
 
 type header_meta = {
   typ : int; (* 1-byte type tag *)
@@ -42,39 +54,39 @@ let header_meta_of t =
 
 let to_bytes t =
   let { typ; id; payload_sz } = header_meta_of t in
-  let frame = header_sz + payload_sz |> Bytes.create in
-  Bytes.set_uint8 frame frame_typ_off typ;
-  Bytes.set_int32_be frame frame_id_off id;
-  Bytes.set_int32_be frame frame_payload_sz_off (Int32.of_int payload_sz);
-  Bytes.blit (payload_of t) 0 frame frame_payload_off payload_sz;
+  let frame = fmt.frame_header_sz + payload_sz |> Bytes.create in
+  Bytes.set_uint8 frame fmt.frame_type_off typ;
+  Bytes.set_int32_be frame fmt.frame_id_off id;
+  Bytes.set_int32_be frame fmt.frame_payload_sz_off (Int32.of_int payload_sz);
+  Bytes.blit (payload_of t) 0 frame fmt.frame_payload_off payload_sz;
   frame
 
-let parse_header_meta bs =
-  if Bytes.length bs < header_sz then Error Header_too_short
+let parse_header_bytes bs =
+  if Bytes.length bs < fmt.frame_header_sz then Error Header_too_short
   else
     Ok
       {
-        typ = Bytes.get_uint8 bs frame_typ_off;
-        id = Bytes.get_int32_be bs frame_id_off;
-        payload_sz = Bytes.get_int32_be bs frame_payload_sz_off |> Int32.to_int;
+        typ = Bytes.get_uint8 bs fmt.frame_type_off;
+        id = Bytes.get_int32_be bs fmt.frame_id_off;
+        payload_sz =
+          Bytes.get_int32_be bs fmt.frame_payload_sz_off |> Int32.to_int;
       }
 
-let make_frame typ id payload =
-  match typ with
+let make_frame id payload = function
   | 0 -> Ok (Msg { id; payload })
   | 1 -> Ok (Ack { id })
   | 2 -> Ok Close
   | tag -> Error (Unknown_frame_type tag)
 
 let of_bytes bs =
-  match parse_header_meta bs with
+  match parse_header_bytes bs with
   | Error e -> Error e
-  | Ok header ->
-      if Bytes.length bs < header_sz + header.payload_sz then
+  | Ok {id;typ;payload_sz} ->
+      if Bytes.length bs < fmt.frame_header_sz + payload_sz then
         Error Payload_too_short
       else
         let payload =
-          if header.payload_sz = 0 then Bytes.empty
-          else Bytes.sub bs header_sz header.payload_sz
+          if payload_sz = 0 then Bytes.empty
+          else Bytes.sub bs fmt.frame_header_sz payload_sz
         in
-        make_frame header.typ header.id payload
+        make_frame id payload typ

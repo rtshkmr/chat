@@ -24,6 +24,7 @@ type t = {
           is because the console will always outlive a session, so it should
           always be available to hydrate the session *)
   state : state;
+  frame_reader : Frame_reader.t;
 }
 
 let init_state () =
@@ -34,8 +35,9 @@ let init_state () =
   }
 
 let create ~ic ~oc ~callbacks ~on_kill =
+  let frame_reader = Frame_reader.create ic in
   let state = init_state () in
-  { ic; oc; callbacks = ref callbacks; state; on_kill }
+  { ic; oc; callbacks = ref callbacks; state; on_kill; frame_reader }
 
 let set_callbacks t cbs =
   t.callbacks := Some cbs;
@@ -45,32 +47,81 @@ let unset_callbacks t =
   t.callbacks := None;
   t
 
+let tx_frame { oc; _ } f =
+  let bs = f |> Frame.to_bytes in
+  let bs_len = Bytes.length bs in
+  let%lwt () = Lwt_io.write_from_exactly oc bs 0 bs_len in
+  Lwt_io.flush oc
+
+(* TODO: better naming, this is only for user-generated msgs *)
 let send_message { state = { msg_queue } } payload =
   Lwt_mvar.put msg_queue payload
 
+let next_msg_id t =
+  t.state.msg_id_counter := Int32.add !(t.state.msg_id_counter) 1l;
+  !(t.state.msg_id_counter)
+
+let track_pending_frame t msg_id =
+  let start_time = Unix.gettimeofday () in
+  Hashtbl.add t.state.pending_acks msg_id start_time
+
+let resolve_and_get_delivery_rtt_exn { state = { pending_acks; _ }; _ } msg_id =
+  match Hashtbl.find_opt pending_acks msg_id with
+  | Some ts ->
+      Hashtbl.remove pending_acks msg_id;
+      Unix.gettimeofday () -. ts
+  | None ->
+      let m =
+        Printf.sprintf "resolve_and_get_delivery_rtt: no such entry %ld" msg_id
+      in
+      failwith m
+
+let get_cbs_exn { callbacks; _ } =
+  match !callbacks with
+  | None -> failwith "TODO: add custom error for lack of callbacks no there"
+  | Some cbs -> cbs
+
+let kill ({ on_kill; callbacks; _ } as t) =
+  let { on_rx_close } = get_cbs_exn t in
+  on_rx_close () >>= fun () ->
+  on_kill () >>= fun () -> Lwt_io.printl "[Session cleaned up]"
+
+let on_peer_termination t =
+  let cbs = get_cbs_exn t in
+  cbs.on_rx_close () >>= fun () -> kill t
+
+let on_rcv_ack t msg_id =
+  let rtt = resolve_and_get_delivery_rtt_exn t msg_id in
+  let cbs = get_cbs_exn t in
+  cbs.on_rx_ack msg_id rtt
+
+let send_ack t id = Frame.Ack { id } |> tx_frame t
+
+let on_rcv_msg t id payload =
+  let { on_rx_msg; _ } = get_cbs_exn t in
+  let%lwt () = on_rx_msg payload in
+  send_ack t id
+
 (* TODO: wire up frame parsing, frame creation, rx callbacks *)
-let rx_loop { ic; _ } =
+let rx_loop ({ ic; frame_reader; _ } as t) =
   let rec loop () =
-    (* TODO [STUB]: upgrade to proper rx loop with frame parsing *)
-    let%lwt line_opt = Lwt_io.read_line_opt ic in
-    match line_opt with
-    | None ->
-        let%lwt () = Lwt_io.printl "[Connection closed by peer]" in
-        Lwt.fail End_of_file
-    | Some line_str ->
-        (* let bs = Bytes.of_string line_str in *)
-        let%lwt () = Lwt_io.printlf "<client>: %s\n" line_str in
-        (* TODO: wire up the rx callbacks here, after frame parsing is done *)
-        loop ()
+    Frame_reader.read_frame frame_reader >>= function
+    | Error e ->
+        (* TODO: improve error handling, likely depends on cases also, not necessarily should propagage error *)
+        Lwt_io.eprintf "Frame error: %s\n" (Frame.error_to_string e)
+        >>= fun () -> Lwt.fail (Failure "frame parse error")
+    | Ok (Frame.Msg { id; payload }) -> on_rcv_msg t id payload >>= loop
+    | Ok (Frame.Ack { id }) -> on_rcv_ack t id >>= loop
+    | Ok Frame.Close -> on_peer_termination t
   in
   loop ()
 
-let tx_loop { oc; state = { msg_queue; _ }; _ } =
+let tx_loop ({ oc; state = { msg_queue; _ }; _ } as t) =
   let rec loop () =
     let%lwt payload = Lwt_mvar.take msg_queue in
-    let line = Bytes.to_string payload in
-    let%lwt () = Lwt_io.write_line oc line in
-    let%lwt () = Lwt_io.flush oc in
+    let id = next_msg_id t in
+    let%lwt () = tx_frame t (Frame.Msg { id; payload }) in
+    track_pending_frame t id;
     loop ()
   in
   loop ()
@@ -83,15 +134,6 @@ let handle_network_io t =
       Lwt_io.eprintf "Unexpected session error: %s\n" (Printexc.to_string e)
     in
     Lwt.fail e
-
-let kill { on_kill; callbacks; _ } =
-  let on_rx_close =
-    match !callbacks with
-    | Some cb -> cb.on_rx_close
-    | None -> fun () -> Lwt.return_unit
-  in
-  on_rx_close () >>= fun () ->
-  on_kill () >>= fun () -> Lwt_io.printl "[Session cleaned up]"
 
 let run t =
   Lwt_io.printl "Running session..." >>= fun () ->

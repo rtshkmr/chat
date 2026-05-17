@@ -67,10 +67,21 @@ let create ~ic ~oc ~on_kill =
   let c = { session = None; listeners = ref []; ic; oc; on_kill } in
   init_console c
 
+(** Formats the payload (exact, raw byte segment) for display.*)
+let format_msg_rx_bs payload =
+  let len = Bytes.length payload in
+  let formatted_payload = Bytes.create (len + 1) in
+  Bytes.blit payload 0 formatted_payload 0 len;
+  Bytes.set formatted_payload len '\n';
+  formatted_payload
+
 let make_console_rx_callbacks { oc; _ } =
-  let on_rx_msg bs = Lwt_io.write_from_exactly oc bs 0 (Bytes.length bs) in
+  let on_rx_msg rx_bs =
+    let formatted_rx_payload = format_msg_rx_bs rx_bs in
+    Lwt_io.write_from_exactly oc formatted_rx_payload 0 (Bytes.length rx_bs)
+  in
   let on_rx_close () = Lwt_io.printl "Your peer has left the chat" in
-  let on_rx_ack id rtt = Lwt_io.printlf "Msg %ld Acked w rtt = %f" id rtt in
+  let on_rx_ack id rtt = Lwt_io.printlf "Msg %ld Acked with rtt = %fs" id rtt in
   { Session.on_rx_msg; on_rx_ack; on_rx_close }
 
 let bind_session t ~session =
