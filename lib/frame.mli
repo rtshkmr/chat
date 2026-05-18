@@ -1,5 +1,10 @@
 type msg_id = int32
-type error = Header_too_short | Payload_too_short | Unknown_frame_type of int
+
+type error =
+  | Header_too_short
+  | Payload_too_short
+  | Unknown_frame_type of int
+  | Payload_too_big of { sz : int; max : int }
 
 type t =
   | Msg of { id : msg_id; payload : bytes }
@@ -9,7 +14,13 @@ type t =
 type header_meta = { typ : int; id : msg_id; payload_sz : int }
 
 val frame_header_sz : int
-val parse_header_bytes : bytes -> (header_meta, error) result
+(** Frame headers are fixed size for Type-Length-Value frames. Frame Structure:
+    [ 9B = <1B type><4B msg_id><4B payload_length> ] *)
+
+val parse_and_validate_header_bytes : bytes -> (header_meta, error) result
+(** [parse_and_validate_header_bytes buf] parses the first
+    [Frame.frame_header_sz] bytes of [buf] as a frame header and validates its
+    fields.*)
 
 val to_bytes : t -> bytes
 (** Serialises a frame to its wire format, ready for tx. Follows network

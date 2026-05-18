@@ -1,7 +1,10 @@
 (* TODO: [ERR] capture user errors well *)
 open Lwt.Infix
 
-type user_event = SendMsg of bytes | SlashCmd of string * string list | Eof
+type user_event =
+  | SendMsg of bytes
+  | SlashCmd of string * string list
+  | UserEof
 [@@warning "-37"]
 (* slash command not wired in yet, to be wired in at [parse_user_input] *)
 
@@ -10,7 +13,7 @@ type listener = user_event -> unit Lwt.t
 type t = {
   ic : Lwt_io.input_channel;
   oc : Lwt_io.output_channel;
-  on_kill : unit -> unit Lwt.t;
+  on_fini : unit -> unit Lwt.t;
   (* TODO QQ: does this really need to be mutable?  *)
   mutable session : Session.t option;
   listeners : listener list ref;
@@ -24,7 +27,7 @@ let register_listeners t fs =
   t
 
 let show_help () = Lwt_io.printl "Commands: /quit, /help"
-let kill t = Lwt_io.printl "Quitting..." >>= t.on_kill
+let fini t = Lwt_io.printl "Quitting..." >>= t.on_fini
 
 type session_listener_factory = Session.t -> listener
 (** Creates a listener that needs to capture a [Session.t] because it relies on
@@ -54,7 +57,7 @@ type user_event_listener_factory = t -> listener
     creating a console*)
 
 let create_slash_cmd_listener t : listener = function
-  | SlashCmd ("/quit", _) -> kill t
+  | SlashCmd ("/quit", _) -> fini t
   | SlashCmd ("/help", _) -> show_help ()
   | SlashCmd (cmd, _) -> Lwt_io.printlf "Unknown command: %s\n" cmd
   | _ -> Lwt.return ()
@@ -72,9 +75,9 @@ let init_console t =
   in
   register_listeners t user_event_listeners
 
-let create ~ic ~oc ~on_kill =
+let create ~ic ~oc ~on_fini =
   (* create the skeleton, init state, allow non-session bound listeners to exist *)
-  let c = { session = None; listeners = ref []; ic; oc; on_kill } in
+  let c = { session = None; listeners = ref []; ic; oc; on_fini } in
   init_console c
 
 (** Formats the payload (exact, raw byte segment) for display.*)
@@ -86,6 +89,7 @@ let format_msg_rx_bs payload =
   formatted_payload
 
 let make_console_rx_callbacks { oc; _ } =
+  (* TODO [ERR:] stdout write failures to be handled (e.g. piping) -- treat as shutdown signal *)
   let on_rx_msg rx_bs =
     let formatted_rx_payload = format_msg_rx_bs rx_bs in
     Lwt_io.write_from_exactly oc formatted_rx_payload 0 (Bytes.length rx_bs)
@@ -114,6 +118,7 @@ let unbind_session t =
 *)
 let parse_user_input line = Some (SendMsg (String.to_bytes line))
 
+(* TODO: [ERR] EOF on stdin (ctrl-D) -- should send up to caller to figure out. Nevertheless --  EOF on stdin in server mode shut down the server *)
 let console_loop t =
   let rec loop () =
     let%lwt line = Lwt_io.read_line t.ic in
@@ -124,11 +129,11 @@ let console_loop t =
   in
   try%lwt loop () (* TODO: [ERR] handle custom errors for console here *)
   with End_of_file ->
-    let%lwt () = dispatch_event t Eof in
+    let%lwt () = dispatch_event t UserEof in
     Lwt.return ()
 
 let run t =
   Lwt_io.printl "Running console..." >>= fun () ->
   let thunk = fun () -> console_loop t in
-  let cleaner_thunk = fun () -> kill t in
+  let cleaner_thunk = fun () -> fini t in
   Lwt.finalize thunk cleaner_thunk

@@ -45,7 +45,11 @@ let init_server_socket ~port ~bind =
   let%lwt () =
     Lwt_io.printlf "Starting server, to listen on %s:%d\n" bind port
   in
+  (* TODO: [ERR] to handle invalid bind addr -- input handling *)
   let inet_addr = Unix.inet_addr_of_string bind in
+  (* TODO: [ERR] to handle invalid port number -- Port 0, negative, > 65535, or a privileged port (<1024 without root).
+           better @ cli validation though
+ *)
   let sockaddr = Unix.(ADDR_INET (inet_addr, port)) in
   let server_socket = Lwt_unix.socket Lwt_unix.PF_INET Lwt_unix.SOCK_STREAM 0 in
   let%lwt () = Lwt_unix.bind server_socket sockaddr in
@@ -56,26 +60,26 @@ let init_server_socket ~port ~bind =
 let init_console () =
   let console_ic = Lwt_io.stdin in
   let console_oc = Lwt_io.stdout in
-  let on_kill_console = make_console_on_kill ~console_ic ~console_oc in
-  Console.create ~ic:console_ic ~oc:console_oc ~on_kill:on_kill_console
+  let on_fini = make_console_on_kill ~console_ic ~console_oc in
+  Console.create ~ic:console_ic ~oc:console_oc ~on_fini
 
 let handle_client_connection console client_socket =
   let net_ic = Lwt_io.of_fd ~mode:Lwt_io.input client_socket in
   let net_oc = Lwt_io.of_fd ~mode:Lwt_io.output client_socket in
-  let on_kill_net = make_net_on_kill ~net_ic ~net_oc in
-  let session =
-    Session.create ~ic:net_ic ~oc:net_oc ~on_kill:on_kill_net ~callbacks:None
-  in
+  let on_fini = make_net_on_kill ~net_ic ~net_oc in
+  let session = Session.create ~ic:net_ic ~oc:net_oc ~on_fini ~callbacks:None in
   let console = Console.bind_session console ~session in
   let thunk = fun () -> Lwt.join [ Session.run session; Console.run console ] in
-  let session_cleaner_thunk = fun () -> Session.kill session in
+  let session_fini = fun () -> Session.fini session in
 
-  let%lwt () = Lwt.finalize thunk session_cleaner_thunk in
+  let%lwt () = Lwt.finalize thunk session_fini in
   let console = Console.unbind_session console in
   let%lwt () = Lwt_io.printl "Waiting for next client..." in
   Lwt.return console
 
+(* TODO: [ERR] EADDRINUSE @ bind — Server port already in use. *)
 (* TODO handle custom errors for known cases *)
+(* TODO: consider base listener for server mode console when message is sent while no connection received yet *)
 (* TODO start server needs a finalizer, so that console can be killed properly *)
 let start_server port bind =
   let%lwt server_socket = init_server_socket ~port ~bind in
@@ -86,6 +90,7 @@ let start_server port bind =
   in
   init_console () |> accept_loop
 
+(* TODO: client and server need fini functions as well for graceful shutdowns (where they'll call the session / console finis also) *)
 let run ~port ~bind ~timeout ~log_level =
   try%lwt start_server port bind
   with e ->

@@ -21,11 +21,20 @@ type console_rx_callbacks = {
 
 type t
 
+type error =
+  | Msg_not_pending_ack of int32
+  | Network_error of string
+  | Frame_error of Frame.error
+
+val error_to_string : error -> string
+
+exception Rx_callbacks_not_binded of string
+
 val create :
   ic:Lwt_io.input_channel ->
   oc:Lwt_io.output_channel ->
   callbacks:console_rx_callbacks option ->
-  on_kill:(unit -> unit Lwt.t) ->
+  on_fini:(unit -> unit Lwt.t) ->
   t
 (** Create a session. Does not start I/O until [run] is called. *)
 
@@ -35,8 +44,8 @@ val set_callbacks : t -> console_rx_callbacks -> t
 
 val unset_callbacks : t -> t
 
-val kill : t -> unit Lwt.t
-(** Kills a session gracefully *)
+val fini : t -> unit Lwt.t
+(** Finalises a session gracefully *)
 
 val send_message : t -> bytes -> unit Lwt.t
 (** Tx a message. Session assigns [ msg_id ], sends frame, tracks in pending-ack

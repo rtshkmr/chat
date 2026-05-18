@@ -3,11 +3,14 @@ type t
 val create :
   ic:Lwt_io.input_channel ->
   oc:Lwt_io.output_channel ->
-  on_kill:(unit -> unit Lwt.t) ->
+  on_fini:(unit -> unit Lwt.t) ->
   t
-(** Create a console with the given input/output channels. Caller is responsible
-    for cleanup (closing channels) that's why it provides a cleanup callback,
-    [on_kill] to the console. *)
+(** Creates a console with the given input/output channels. Caller is
+    responsible for cleanup (closing channels) that's why it provides a cleanup
+    callback, [on_kill] to the console. *)
+
+val fini : t -> unit Lwt.t
+(** Finalises a console gracefully *)
 
 val bind_session : t -> session:Session.t -> t
 (** Binds a console (possibly longer-lived lifecycle) to a session.*)

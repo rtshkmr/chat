@@ -2,16 +2,18 @@ open Lwt.Infix
 
 let close_io_channels ic oc = Lwt_io.close ic >>= fun () -> Lwt_io.close oc
 
-let make_console_on_kill ~console_ic ~console_oc =
+let make_console_on_fini ~console_ic ~console_oc =
  fun () ->
   close_io_channels console_ic console_oc >>= fun () ->
   Lwt_io.printl "[Disconnected from console]"
 
-let make_net_on_kill ~net_ic ~net_oc =
+let make_net_on_fini ~net_ic ~net_oc =
  fun () ->
   close_io_channels net_ic net_oc >>= fun () ->
   Lwt_io.printl "[Disconnected from network]"
 
+(* TODO: [ERR] ECONNREFUSED @ connect — Client connecting to a server that's not running -- just print helpful message and init fini? *)
+(* TODO: [ERR] dns resolution failure @ getaddrinfo -- just print helpful message and init fini? *)
 let init_client_socket ~host ~port =
   let%lwt addr_info =
     Lwt_unix.getaddrinfo host (string_of_int port) [ Unix.(AI_FAMILY PF_INET) ]
@@ -26,14 +28,14 @@ let init_client_socket ~host ~port =
 let init_console () =
   let ic = Lwt_io.stdin in
   let oc = Lwt_io.stdout in
-  let on_kill = make_console_on_kill ~console_ic:ic ~console_oc:oc in
-  Console.create ~ic ~oc ~on_kill
+  let on_fini = make_console_on_fini ~console_ic:ic ~console_oc:oc in
+  Console.create ~ic ~oc ~on_fini
 
 let init_session sock =
   let net_ic = Lwt_io.of_fd ~mode:Lwt_io.input sock in
   let net_oc = Lwt_io.of_fd ~mode:Lwt_io.output sock in
-  let on_kill = make_net_on_kill ~net_ic ~net_oc in
-  Session.create ~ic:net_ic ~oc:net_oc ~on_kill ~callbacks:None
+  let on_fini = make_net_on_fini ~net_ic ~net_oc in
+  Session.create ~ic:net_ic ~oc:net_oc ~on_fini ~callbacks:None
 
 let run_session ~host ~port =
   let%lwt client_socket = init_client_socket ~host ~port in
@@ -41,10 +43,11 @@ let run_session ~host ~port =
   let console = init_console () |> Console.bind_session ~session in
 
   let thunk = fun () -> Lwt.join [ Session.run session; Console.run console ] in
-  let cleaner_thunk = fun () -> Session.kill session in
+  let cleaner_thunk = fun () -> Session.fini session in
 
   Lwt.finalize thunk cleaner_thunk
 
+(* TODO: client and server need fini functions as well for graceful shutdowns (where they'll call the session / console finis also) *)
 (* TODO: [STUB] timeout needs to be used so need auto-cancellations and all that *)
 let run ~host ~port ~timeout ~log_level =
   let%lwt () = Lwt_io.printlf "Connecting client to %s:%d\n" host port in
