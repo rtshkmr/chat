@@ -1,8 +1,10 @@
-(* TODO: capture user errors well *)
-open Lwt
+(* TODO: [ERR] capture user errors well *)
 open Lwt.Infix
 
 type user_event = SendMsg of bytes | SlashCmd of string * string list | Eof
+[@@warning "-37"]
+(* slash command not wired in yet, to be wired in at [parse_user_input] *)
+
 type listener = user_event -> unit Lwt.t
 
 type t = {
@@ -36,6 +38,10 @@ type session_listener_factory = Session.t -> listener
 let create_send_msg_listener s : listener = function
   | SendMsg bs -> Session.send_message s bs
   | _ -> Lwt.return ()
+[@@warning "-4"]
+(* Listener pattern: User events of type [user_event] get dispatched to a collection of
+    listeners. These listeners are like observers that ignore cases that don't
+    matter to them. Hence the shim. This function only cares about [ SendMsg ] *)
 
 let session_listener_factories : session_listener_factory list =
   [ create_send_msg_listener ]
@@ -52,6 +58,10 @@ let create_slash_cmd_listener t : listener = function
   | SlashCmd ("/help", _) -> show_help ()
   | SlashCmd (cmd, _) -> Lwt_io.printlf "Unknown command: %s\n" cmd
   | _ -> Lwt.return ()
+[@@warning "-4"]
+(* Listener pattern: User events of type [user_event] get dispatched to a collection of
+    listeners. These listeners are like observers that ignore cases that don't
+    matter to them. Hence the shim. This function only cares about [ SlashCmd ] *)
 
 let user_event_listener_factories : user_event_listener_factory list =
   [ create_slash_cmd_listener ]
@@ -93,13 +103,15 @@ let bind_session t ~session =
   register_listeners t session_listeners
 
 let unbind_session t =
-  (* TODO: verify if this cleanup is needed, not sure if will have dangling ptrs *)
+  (* TODO: [PERF] verify if this cleanup is needed, not sure if will have dangling ptrs *)
   let _ = Option.map Session.unset_callbacks t.session in
   t.session <- None;
   t.listeners := [];
   init_console t
 
-(* TODO:[STUB] implement this right -- it should end up creating frames if it's a [SendMsg], else slash commands and so on *)
+(* TODO:[STUB] implement this right -- it should end up creating frames if it's a [SendMsg], else slash commands and so on
+   TODO: [STUB] slash commands to be parsed here as well, not just messages
+*)
 let parse_user_input line = Some (SendMsg (String.to_bytes line))
 
 let console_loop t =
@@ -110,7 +122,7 @@ let console_loop t =
       | Some e -> dispatch_event t e)
     >>= fun () -> loop ()
   in
-  try%lwt loop () (* TODO: handle custom errors for console here *)
+  try%lwt loop () (* TODO: [ERR] handle custom errors for console here *)
   with End_of_file ->
     let%lwt () = dispatch_event t Eof in
     Lwt.return ()

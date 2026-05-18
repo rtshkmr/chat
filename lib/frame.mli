@@ -22,7 +22,7 @@ val of_bytes : bytes -> (t, error) result
     byte-order, BE) into a frame. Returns an error if the buffer is incomplete
     or contains invalid data.
 
-    Intended for non-streaming use. TODO: YAGNI? *)
+    Intended for non-streaming use. TODO: [POLISH] YAGNI? *)
 
 val error_to_string : error -> string
 (** Converts an error to a human-readable string.*)

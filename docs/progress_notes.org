@@ -86,9 +86,9 @@ This is like the queue before but without a max capacity. Like a limitless buffe
   - stdin and socket writes are completely independent
 *** Current Decision
 For this POC, option A is good enough, but I might consider a bufferred queue because bufferred mechanics feel right in such a case of inter-thread coordination.
-** TODO Different Ways to Define Frames
-** TODO Session as coordinator of all network IO
-** TODO Decoupling user IO (Console) and network IO (Session)
+** TODO [DOC] Different Ways to Define Frames
+** TODO [DOC] Session as coordinator of all network IO
+** TODO [DOC] Decoupling user IO (Console) and network IO (Session)
 *** ownership of the stdin read loop
 *** decoupling rationale
 temp note:
@@ -116,8 +116,8 @@ I see the merits of NOT creating an App module yet and wiring that up. At the sa
 
 - so it's natural to end up with a 2-phased init for this
 *** channel creator should be responsible for it's fini logic also and how that plays into DI and RAII intuitions
-** TODO Supervision and future Supervision Strats
-** TODO NOT using a TUI, line-based buffering @ Console
+** TODO [DOC] Supervision and future Supervision Strats
+** TODO [DOC] NOT using a TUI, line-based buffering @ Console
 UI Layer (Future): Single-line input via readline in v0.
 
 Multi-line and advanced terminal features (message history rendering, status bar) can be implemented via a Notty-based UI module as a drop-in replacement.

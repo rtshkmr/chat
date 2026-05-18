@@ -1,4 +1,3 @@
-open Lwt
 open Lwt.Infix
 
 let close_io_channels ic oc = Lwt_io.close ic >>= fun () -> Lwt_io.close oc
@@ -46,10 +45,12 @@ let run_session ~host ~port =
 
   Lwt.finalize thunk cleaner_thunk
 
-(* TODO: timeout needs to be used so need auto-cancellations and all that *)
+(* TODO: [STUB] timeout needs to be used so need auto-cancellations and all that *)
 let run ~host ~port ~timeout ~log_level =
   let%lwt () = Lwt_io.printlf "Connecting client to %s:%d\n" host port in
   try%lwt run_session ~host ~port
   with e ->
     let%lwt () = Lwt_io.eprintf "Client error: %s\n" (Printexc.to_string e) in
     Lwt.fail e
+[@@warning "-27"]
+(*-- TODO: [STUB] wire up log levels and conn timeout *)

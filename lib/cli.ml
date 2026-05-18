@@ -1,6 +1,9 @@
-(* TODO: add arg validation:
+(* TODO: [ERR] add arg validation:
    - e.g. port should be safe, use regex for hostname/ip addr (ref RFC) *)
-(* TODO: consider better error handling *)
+(* TODO: [ERR] consider better error handling *)
+
+[@@@warning "-44"]
+(* case 1: [open Cmdliner] makes [ Arg ] avail which is fine because we use it multiple times for this cli setup *)
 
 open Cmdliner
 
@@ -27,6 +30,7 @@ let log_level_arg =
     value
     & opt (enum levels) default_level
     & info [ "log-level" ] ~docv:"LEVEL" ~doc)
+[@@warning "-45-44"]
 
 let port_server_arg =
   let default = 4242 in

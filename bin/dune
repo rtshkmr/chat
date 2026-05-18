@@ -1,4 +1,6 @@
 (executable
  (public_name chat)
  (name main)
+ (flags
+  (-w +a-40-42 -warn-error +a-40-42))
  (libraries chat cmdliner lwt lwt.unix))

@@ -1,4 +1,3 @@
-open Lwt
 open Lwt.Infix
 
 type console_rx_callbacks = {
@@ -18,14 +17,16 @@ type t = {
   oc : Lwt_io.output_channel;
   on_kill : unit -> unit Lwt.t;
   callbacks : console_rx_callbacks option ref;
-      (** TODO: the fact that it is an optional now means that we need to add in
-          an exception because an invariant to maintain here is that there's
-          NEVER a case when we try to invoke any callback when it's empty. This
-          is because the console will always outlive a session, so it should
-          always be available to hydrate the session *)
+      (** TODO: [ERR] the fact that it is an optional now means that we need to
+          add in an exception because an invariant to maintain here is that
+          there's NEVER a case when we try to invoke any callback when it's
+          empty. This is because the console will always outlive a session, so
+          it should always be available to hydrate the session *)
   state : state;
   frame_reader : Frame_reader.t;
 }
+[@@warning "-69"]
+(*[ic] is not being used but that's a design things to be relooked at. [ frame_reader ] ends up getting constructed so [ic] is within that, but then [oc] is left alone if we just remove [ic] from t. I guess this is alright? TODO: consider this from a design pov*)
 
 let init_state () =
   {
@@ -53,8 +54,8 @@ let tx_frame { oc; _ } f =
   let%lwt () = Lwt_io.write_from_exactly oc bs 0 bs_len in
   Lwt_io.flush oc
 
-(* TODO: better naming, this is only for user-generated msgs *)
-let send_message { state = { msg_queue } } payload =
+(* TODO: [POLISH] better naming, this is only for user-generated msgs *)
+let send_message { state = { msg_queue; _ }; _ } payload =
   Lwt_mvar.put msg_queue payload
 
 let next_msg_id t =
@@ -81,8 +82,8 @@ let get_cbs_exn { callbacks; _ } =
   | None -> failwith "TODO: add custom error for lack of callbacks no there"
   | Some cbs -> cbs
 
-let kill ({ on_kill; callbacks; _ } as t) =
-  let { on_rx_close } = get_cbs_exn t in
+let kill ({ on_kill; _ } as t) =
+  let { on_rx_close; _ } = get_cbs_exn t in
   on_rx_close () >>= fun () ->
   on_kill () >>= fun () -> Lwt_io.printl "[Session cleaned up]"
 
@@ -102,12 +103,11 @@ let on_rcv_msg t id payload =
   let%lwt () = on_rx_msg payload in
   send_ack t id
 
-(* TODO: wire up frame parsing, frame creation, rx callbacks *)
-let rx_loop ({ ic; frame_reader; _ } as t) =
+let rx_loop ({ frame_reader; _ } as t) =
   let rec loop () =
     Frame_reader.read_frame frame_reader >>= function
     | Error e ->
-        (* TODO: improve error handling, likely depends on cases also, not necessarily should propagage error *)
+        (* TODO:[ERR] improve error handling, likely depends on cases also, not necessarily should propagage error *)
         Lwt_io.eprintf "Frame error: %s\n" (Frame.error_to_string e)
         >>= fun () -> Lwt.fail (Failure "frame parse error")
     | Ok (Frame.Msg { id; payload }) -> on_rcv_msg t id payload >>= loop
@@ -116,7 +116,7 @@ let rx_loop ({ ic; frame_reader; _ } as t) =
   in
   loop ()
 
-let tx_loop ({ oc; state = { msg_queue; _ }; _ } as t) =
+let tx_loop ({ state = { msg_queue; _ }; _ } as t) =
   let rec loop () =
     let%lwt payload = Lwt_mvar.take msg_queue in
     let id = next_msg_id t in
@@ -126,7 +126,7 @@ let tx_loop ({ oc; state = { msg_queue; _ }; _ } as t) =
   in
   loop ()
 
-(* TODO: create custom lwt errors to be handled*)
+(* TODO: [ERR] create custom lwt errors to be handled*)
 let handle_network_io t =
   try%lwt Lwt.join [ rx_loop t; tx_loop t ]
   with e ->

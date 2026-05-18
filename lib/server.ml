@@ -1,4 +1,4 @@
-(* TODO: add proper error/exception handling:
+(* TODO: [ERR] add proper error/exception handling:
    1. state logic errors --
       i) EOF @ read (client disconnection gracefully)
      ii) Input issues e.g. ip addr
@@ -10,11 +10,11 @@
       i) invariant violations -- assertions maybe
      ii) resource exhaustion that can't be handled
 *)
-(* FIXME: [1] there's an issue here that console run should be running for the
+(* FIXME: [1-LIFECYCLE] there's an issue here that console run should be running for the
     whole server's lifetime. The problem here is that we're calling Console.run
     here again, it shouldn't be the case because we just need to call
     Console.run once. *)
-(* FIXME: [2] Server lifecycle on EOF
+(* FIXME: [2-LIFECYCLE] Server lifecycle on EOF
 
    Currently, if the server operator presses Ctrl-D (EOF on stdin), the console
    reads End_of_file, Console.run exits, which calls on_kill_console and closes
@@ -27,7 +27,6 @@
 
    For now, we rely on the /quit command for controlled shutdown and defer this problem.
 *)
-open Lwt
 open Lwt.Infix
 
 let close_io_channels ic oc = Lwt_io.close ic >>= fun () -> Lwt_io.close oc
@@ -48,7 +47,7 @@ let init_server_socket ~port ~bind =
   in
   let inet_addr = Unix.inet_addr_of_string bind in
   let sockaddr = Unix.(ADDR_INET (inet_addr, port)) in
-  let server_socket = Lwt_unix.socket PF_INET SOCK_STREAM 0 in
+  let server_socket = Lwt_unix.socket Lwt_unix.PF_INET Lwt_unix.SOCK_STREAM 0 in
   let%lwt () = Lwt_unix.bind server_socket sockaddr in
   Lwt_unix.listen server_socket 1;
   let%lwt () = Lwt_io.printlf "Server listening on %s:%d\n" bind port in
@@ -92,3 +91,5 @@ let run ~port ~bind ~timeout ~log_level =
   with e ->
     let%lwt () = Lwt_io.eprintf "Server error: %s\n" (Printexc.to_string e) in
     Lwt.fail e
+[@@warning "-27"]
+(*-- TODO: [POLISH] wire up log levels and conn timeout *)

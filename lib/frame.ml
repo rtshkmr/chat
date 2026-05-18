@@ -29,6 +29,7 @@ let fmt = frame_format
 type error = Header_too_short | Payload_too_short | Unknown_frame_type of int
 
 exception Frame_error of error
+    [@@warning "-38"] (* TODO: [ERR] wire up [ Frame_error ] usage *)
 
 let error_to_string = function
   | Header_too_short -> "Frame header too short"
@@ -36,7 +37,7 @@ let error_to_string = function
   | Unknown_frame_type tag -> Printf.sprintf "Unknown frame type: %d" tag
 
 let type_of = function Msg _ -> 0 | Ack _ -> 1 | Close -> 2
-let payload_of = function Msg { payload; _ } -> payload | _ -> Bytes.empty
+let payload_of = function Msg { payload; _ } -> payload | Ack _ | Close -> Bytes.empty
 
 type header_meta = {
   typ : int; (* 1-byte type tag *)
