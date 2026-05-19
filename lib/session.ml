@@ -19,11 +19,6 @@ type t = {
   oc : Lwt_io.output_channel;
   on_fini : unit -> unit Lwt.t;
   callbacks : console_rx_callbacks option ref;
-      (** TODO: [ERR] the fact that it is an optional now means that we need to
-          add in an exception because an invariant to maintain here is that
-          there's NEVER a case when we try to invoke any callback when it's
-          empty. This is because the console will always outlive a session, so
-          it should always be available to hydrate the session *)
   state : state;
   frame_reader : FR.t;
 }
@@ -39,8 +34,6 @@ let error_to_string = function
   | Msg_not_pending_ack id -> Printf.sprintf "Msg %ld is not pending ack" id
   | Network_error err_str -> Printf.sprintf "Network error: %s" err_str
   | Frame_error e -> F.error_to_string e
-[@@warning "-32"]
-(* TODO: [ERR] wire up session errors*)
 
 exception Rx_callbacks_not_binded of string
 
@@ -65,8 +58,6 @@ let unset_callbacks t =
   t.callbacks := None;
   t
 
-(* TODO: [ERR] ECONNRESET handling here -- "Connection Lost" *)
-(* TODO: [ERR] EPIPE/broken pipe handling here or in handle_network io --- should consider as connection closed *)
 let tx_frame { oc; _ } f =
   let bs = f |> F.to_bytes in
   let bs_len = Bytes.length bs in
@@ -137,7 +128,6 @@ let on_rcv_ack t msg_id =
       let msg = error_to_string e in
       Lwt_io.eprint ("[WARNING]: " ^ msg ^ ". Ignoring this...")
 
-(* TODO: [ERR] EPIPE/broken pipe handling here *)
 let send_ack t id = F.Ack { id } |> tx_frame t
 
 let on_rcv_msg t id payload =
@@ -173,16 +163,21 @@ let tx_loop ({ state = { msg_queue; _ }; _ } as t) =
   loop ()
 
 (* TODO: [ERR] create custom lwt errors to be handled*)
-(* TODO: [ERR] EPIPE/broken pipe handling here or in handle_network io --- should consider as connection closed *)
 (* TODO: [DESIGN] ALT DESIGN CHOICE: Consider the pattern: "Session.run should never propagate exceptions to its caller. It owns its lifecycle. The caller (accept_loop) just needs to know "session is done" — the reason doesn't change what accept_loop does next (unbind, wait for next client). Session logs the reason internally." *)
 let handle_network_io t =
   try%lwt Lwt.pick [ rx_loop t; tx_loop t ] with
   | Lwt.Canceled -> Lwt.return_unit
+  | Unix.Unix_error (Unix.ECONNRESET, _, _) ->
+      Lwt_io.eprintf "Peer disconnected, connection reset\n"
+  | Unix.Unix_error (Unix.EPIPE, _, _) ->
+      Lwt_io.eprintf "Broken pipe: peer closed connection\n"
   | e ->
       let%lwt () =
         Lwt_io.eprintf "Unexpected session error: %s\n" (Printexc.to_string e)
       in
       Lwt.fail e
+[@@warning "-4"]
+(* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)
 
 let run t =
   Lwt_io.printl "Running session..." >>= fun () ->

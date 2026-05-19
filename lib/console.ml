@@ -20,7 +20,11 @@ type t = {
 }
 
 let dispatch_event t e =
-  Lwt_list.iter_p (fun listener -> listener e) !(t.listeners)
+  Lwt_list.iter_p
+    (fun listener ->
+      try%lwt listener e
+      with e -> Lwt_io.eprintf "[Listener error: %s]\n" (Printexc.to_string e))
+    !(t.listeners)
 
 let register_listeners t fs =
   t.listeners := !(t.listeners) @ fs;
@@ -60,14 +64,23 @@ let create_slash_cmd_listener t : listener = function
   | SlashCmd ("/quit", _) -> fini t
   | SlashCmd ("/help", _) -> show_help ()
   | SlashCmd (cmd, _) -> Lwt_io.printlf "Unknown command: %s\n" cmd
-  | _ -> Lwt.return ()
+  | _ -> Lwt.return_unit
 [@@warning "-4"]
 (* Listener pattern: User events of type [user_event] get dispatched to a collection of
     listeners. These listeners are like observers that ignore cases that don't
     matter to them. Hence the shim. This function only cares about [ SlashCmd ] *)
 
+let create_no_session_listener t : listener = function
+  | SendMsg _ when Option.is_none t.session ->
+      Lwt_io.printl
+        "[You're not in an active session. Wait for a client to connect before \
+         sending messages...]"
+  | _ -> Lwt.return_unit
+[@@warning "-4"]
+(* Listener pattern: this doesn't care about any other event -- it just ignores*)
+
 let user_event_listener_factories : user_event_listener_factory list =
-  [ create_slash_cmd_listener ]
+  [ create_slash_cmd_listener; create_no_session_listener ]
 
 let init_console t =
   let user_event_listeners =
@@ -77,9 +90,7 @@ let init_console t =
 
 let create ?(ic = Lwt_io.stdin) ?(oc = Lwt_io.stdout)
     ?(on_fini = fun () -> Lwt.return_unit) () =
-  (* create the skeleton, init state, allow non-session bound listeners to exist *)
-  let c = { session = None; listeners = ref []; ic; oc; on_fini } in
-  init_console c
+  init_console { session = None; listeners = ref []; ic; oc; on_fini }
 
 (** Formats the payload (exact, raw byte segment) for display.*)
 let format_msg_rx_bs payload =
@@ -89,13 +100,27 @@ let format_msg_rx_bs payload =
   Bytes.set formatted_payload len '\n';
   formatted_payload
 
-let make_console_rx_callbacks { oc; _ } =
-  (* TODO [ERR:] stdout write failures to be handled (e.g. piping) -- treat as shutdown signal *)
+let make_on_rx_msg_cb oc =
   let on_rx_msg rx_bs =
-    let fmted_rx_payload = format_msg_rx_bs rx_bs in
-    let fmted_payload_len = Bytes.length fmted_rx_payload in
-    Lwt_io.write_from_exactly oc fmted_rx_payload 0 fmted_payload_len
+    try%lwt
+      let fmted_rx_payload = format_msg_rx_bs rx_bs in
+      let fmted_payload_len = Bytes.length fmted_rx_payload in
+      Lwt_io.write_from_exactly oc fmted_rx_payload 0 fmted_payload_len
+    with
+    | Unix.Unix_error (Unix.EPIPE, _, _) ->
+        Lwt_io.eprintf
+          "[STDOUT ERROR: Output pipe broken (e.g., redirected to closed file)]\n"
+        >>= fun () -> Lwt.fail_with "stdout broken"
+    | Unix.Unix_error (Unix.EBADF, _, _) ->
+        Lwt_io.eprintf "[STDOUT ERROR: Invalid file descriptor]\n" >>= fun () ->
+        Lwt.fail_with "stdout invalid"
   in
+  on_rx_msg
+[@@warning "-4"]
+(* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)
+
+let make_console_rx_callbacks { oc; _ } =
+  let on_rx_msg = make_on_rx_msg_cb oc in
   let on_rx_close () = Lwt_io.printl "Your peer has left the chat" in
   let on_rx_ack id rtt = Lwt_io.printlf "Msg %ld Acked with rtt = %fs" id rtt in
   { Session.on_rx_msg; on_rx_ack; on_rx_close }
@@ -120,7 +145,6 @@ let unbind_session t =
 *)
 let parse_user_input line = Some (SendMsg (String.to_bytes line))
 
-(* TODO: [ERR] EOF on stdin (ctrl-D) -- should send up to caller to figure out. Nevertheless --  EOF on stdin in server mode shut down the server *)
 let console_loop t =
   let rec loop () =
     let%lwt line = Lwt_io.read_line t.ic in
@@ -129,9 +153,13 @@ let console_loop t =
       | Some e -> dispatch_event t e)
     >>= fun () -> loop ()
   in
-  try%lwt loop () (* TODO: [ERR] handle custom errors for console here *) with
+  try%lwt loop () with
   | End_of_file -> dispatch_event t UserEof
   | Lwt.Canceled -> Lwt.return_unit
+  | Unix.Unix_error (e, op, arg) ->
+      Lwt_io.eprintf "[Console I/O error: %s on %s %s]\n" (Unix.error_message e)
+        op arg
+  | e -> Lwt_io.eprintf "[Unknown Console error: %s]\n" (Printexc.to_string e)
 
 let run t =
   Lwt_io.printl "Running console..." >>= fun () ->

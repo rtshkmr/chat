@@ -2,6 +2,6 @@
  (name chat)
  (flags
   (-w +a-40-42 -warn-error +a-40-42))
- (libraries lwt lwt.unix logs cmdliner)
+ (libraries lwt lwt.unix logs cmdliner re)
  (preprocess
   (pps lwt_ppx)))

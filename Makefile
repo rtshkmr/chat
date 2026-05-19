@@ -1,4 +1,4 @@
-.PHONY: build test clean utop fmt watch dev install doc run
+.PHONY: build test clean utop fmt watch dev install doc server client
 
 build:
 	dune build
@@ -27,5 +27,7 @@ install:
 doc:
 	dune build @doc
 
-run:
-	dune exec ./bin/main.exe -- $(filter-out $@,$(MAKECMDGOALS))
+# NOTE: this make target is a convenience artefact, relies on gnu-style arg-forwarding using --
+# e.g. make server -- -p 5050
+server client:
+	@dune exec ./bin/main.exe $@ -- $(filter-out $@,$(MAKECMDGOALS))

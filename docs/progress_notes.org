@@ -283,7 +283,6 @@ An argument may be made that IF the finis are idempotent then we can use a [[htt
 
 -----
 
-
 * Knowledge Gaps and Learnings
 ** Tooling / Ecosystem Choices and Learnings
 *** Concurrency: use =Lwt= first, if all goes right, it should be possible to demo the migration to =Eio=

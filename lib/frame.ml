@@ -35,9 +35,6 @@ type error =
   | Unknown_frame_type of int
   | Payload_too_big of { sz : int; max : int }
 
-(* exception Frame_error of error [@@warning "-38"] *)
-(* (\* TODO: [ERR] wire up [ Frame_error ] usage *\) *)
-
 let error_to_string = function
   | Header_too_short -> "Frame header too short"
   | Payload_too_short -> "Frame payload incomplete"
