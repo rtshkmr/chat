@@ -21,6 +21,7 @@ type t = {
   callbacks : console_rx_callbacks option ref;
   state : state;
   frame_reader : FR.t;
+  shutdown_cond : unit Lwt_condition.t;
 }
 [@@warning "-69"]
 (*[ic] is not being used but that's a design things to be relooked at. [ frame_reader ] ends up getting constructed so [ic] is within that, but then [oc] is left alone if we just remove [ic] from t. I guess this is alright? TODO: consider this from a design pov*)
@@ -46,9 +47,15 @@ let init_state () =
 
 let create ~ic ~oc ?(callbacks = None) ?(on_fini = fun () -> Lwt.return_unit) ()
     =
-  let frame_reader = FR.create ic in
-  let state = init_state () in
-  { ic; oc; callbacks = ref callbacks; state; on_fini; frame_reader }
+  {
+    ic;
+    oc;
+    callbacks = ref callbacks;
+    state = init_state ();
+    on_fini;
+    frame_reader = FR.create ic;
+    shutdown_cond = Lwt_condition.create ();
+  }
 
 let set_callbacks t cbs =
   t.callbacks := Some cbs;
@@ -110,6 +117,14 @@ let maybe_display_pending_acks { state = { pending_acks; _ }; _ } =
         Lwt_io.printl (Printf.sprintf "Msg %ld sent at %.3f" msg_id time))
       pending_acks Lwt.return_unit
 
+let send_ack t id = F.Ack { id } |> tx_frame t
+let send_close t = F.Close |> tx_frame t
+
+let shutdown t =
+  send_close t >>= fun () ->
+  Lwt_condition.signal t.shutdown_cond ();
+  Lwt.return_unit
+
 let fini ({ on_fini; _ } as t) =
   Lwt_io.printl "Finalising session..." >>= fun () ->
   maybe_display_pending_acks t >>= fun () ->
@@ -127,8 +142,6 @@ let on_rcv_ack t msg_id =
   | Error e ->
       let msg = error_to_string e in
       Lwt_io.eprint ("[WARNING]: " ^ msg ^ ". Ignoring this...")
-
-let send_ack t id = F.Ack { id } |> tx_frame t
 
 let on_rcv_msg t id payload =
   let { on_rx_msg; _ } = get_cbs_exn t in
@@ -162,10 +175,13 @@ let tx_loop ({ state = { msg_queue; _ }; _ } as t) =
   in
   loop ()
 
+let await_shutdown_signal { shutdown_cond; _ } =
+  Lwt_condition.wait shutdown_cond
+
 (* TODO: [ERR] create custom lwt errors to be handled*)
 (* TODO: [DESIGN] ALT DESIGN CHOICE: Consider the pattern: "Session.run should never propagate exceptions to its caller. It owns its lifecycle. The caller (accept_loop) just needs to know "session is done" — the reason doesn't change what accept_loop does next (unbind, wait for next client). Session logs the reason internally." *)
 let handle_network_io t =
-  try%lwt Lwt.pick [ rx_loop t; tx_loop t ] with
+  try%lwt Lwt.pick [ rx_loop t; tx_loop t; await_shutdown_signal t ] with
   | Lwt.Canceled -> Lwt.return_unit
   | Unix.Unix_error (Unix.ECONNRESET, _, _) ->
       Lwt_io.eprintf "Peer disconnected, connection reset\n"

@@ -301,5 +301,16 @@ The learning is that we should choose based on:
    * do the tasks have independent fates (one dying shouldn't affect others)? $\implies$ =Lwt.join=
 
 Finalisation must have clear ownership, remember to avoid double-finalisation by having only the owner finalise a resource $\implies$ RAII-intuition
+** Lwt Task Supervision for Infinite Loops demands  Explicit Cancellation Semantics
+When supervising infinite loops (like =accept_loop=) with =Lwt.pick=
+
+- =Lwt.pick [ task1; task2 ]= attempts to cancel the other task when one completes
+- Infinite loops must explicitly handle =Lwt.Canceled= or scheduling races occur
+- Pattern: wrap loop in =try%lwt ... with Lwt.Canceled → Lwt.return_unit= for explicit cancellation handling
+
+Without this, we may see deterministic output ordering issues where cleanup
+prints before the cancelled task has a chance to exit gracefully.
+
 * Future Extension Considerations
 -----
+

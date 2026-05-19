@@ -45,8 +45,8 @@ val set_callbacks : t -> console_rx_callbacks -> t
 
 val unset_callbacks : t -> t
 
-val fini : t -> unit Lwt.t
-(** Finalises a session gracefully *)
+val shutdown : t -> unit Lwt.t
+(** Closes a chat session gracefully *)
 
 val send_message : t -> bytes -> unit Lwt.t
 (** Tx a message. Session assigns [ msg_id ], sends frame, tracks in pending-ack

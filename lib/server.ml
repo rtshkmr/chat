@@ -48,13 +48,15 @@ let run_server port bind =
   let%lwt server_socket = init_server_socket ~port ~bind in
   let console = Console.create () in
   let rec accept_loop () =
-    let%lwt client_socket, _addr = Lwt_unix.accept server_socket in
-    let session = init_session client_socket in
-    let console = Console.bind_session console ~session in
-    let%lwt () = Session.run session in
-    let _ = Console.unbind_session console in
-    let%lwt () = Lwt_io.printl "Waiting for next client..." in
-    accept_loop ()
+    try%lwt
+      let%lwt () = Lwt_io.printl "Awaiting chat connections..." in
+      let%lwt client_socket, _addr = Lwt_unix.accept server_socket in
+      let session = init_session client_socket in
+      let console = Console.bind_session console ~session in
+      let%lwt () = Session.run session in
+      let _ = Console.unbind_session console in
+      accept_loop ()
+    with Lwt.Canceled -> Lwt.return_unit
   in
   let thunk () = Lwt.pick [ accept_loop (); Console.run console ] in
   let fini () =
@@ -81,3 +83,5 @@ let run ~port ~bind ~timeout ~log_level =
 [@@warning "-27-4"]
 (* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)
 (*-- TODO: [STUB] wire up log levels and conn timeout *)
+
+(* QQ: what happens if server is shutdown? then will the underlying session and console also be gracefully shut down? *)
