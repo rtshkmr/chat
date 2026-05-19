@@ -1,9 +1,10 @@
 type t
 
 val create :
-  ic:Lwt_io.input_channel ->
-  oc:Lwt_io.output_channel ->
-  on_fini:(unit -> unit Lwt.t) ->
+  ?ic:Lwt_io.input_channel ->
+  ?oc:Lwt_io.output_channel ->
+  ?on_fini:(unit -> unit Lwt.t) ->
+  unit ->
   t
 (** Creates a console with the given input/output channels. Caller is
     responsible for cleanup (closing channels) that's why it provides a cleanup

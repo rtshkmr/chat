@@ -1,14 +1,16 @@
 open Lwt.Infix
+module F = Frame
+module FR = Frame_reader
 
 type console_rx_callbacks = {
   on_rx_msg : bytes -> unit Lwt.t;
-  on_rx_ack : Frame.msg_id -> float -> unit Lwt.t;
+  on_rx_ack : F.msg_id -> float -> unit Lwt.t;
   on_rx_close : unit -> unit Lwt.t;
 }
 
 type state = {
   msg_id_counter : int32 ref;
-  pending_acks : (Frame.msg_id, float) Hashtbl.t;
+  pending_acks : (F.msg_id, float) Hashtbl.t;
   msg_queue : bytes Lwt_mvar.t;  (** Used for coordinating payloads for tx*)
 }
 
@@ -23,7 +25,7 @@ type t = {
           empty. This is because the console will always outlive a session, so
           it should always be available to hydrate the session *)
   state : state;
-  frame_reader : Frame_reader.t;
+  frame_reader : FR.t;
 }
 [@@warning "-69"]
 (*[ic] is not being used but that's a design things to be relooked at. [ frame_reader ] ends up getting constructed so [ic] is within that, but then [oc] is left alone if we just remove [ic] from t. I guess this is alright? TODO: consider this from a design pov*)
@@ -31,12 +33,12 @@ type t = {
 type error =
   | Msg_not_pending_ack of int32
   | Network_error of string
-  | Frame_error of Frame.error
+  | Frame_error of F.error
 
 let error_to_string = function
   | Msg_not_pending_ack id -> Printf.sprintf "Msg %ld is not pending ack" id
   | Network_error err_str -> Printf.sprintf "Network error: %s" err_str
-  | Frame_error e -> Frame.error_to_string e
+  | Frame_error e -> F.error_to_string e
 [@@warning "-32"]
 (* TODO: [ERR] wire up session errors*)
 
@@ -49,8 +51,9 @@ let init_state () =
     msg_queue = Lwt_mvar.create_empty ();
   }
 
-let create ~ic ~oc ~callbacks ~on_fini =
-  let frame_reader = Frame_reader.create ic in
+let create ~ic ~oc ?(callbacks = None) ?(on_fini = fun () -> Lwt.return_unit) ()
+    =
+  let frame_reader = FR.create ic in
   let state = init_state () in
   { ic; oc; callbacks = ref callbacks; state; on_fini; frame_reader }
 
@@ -65,7 +68,7 @@ let unset_callbacks t =
 (* TODO: [ERR] ECONNRESET handling here -- "Connection Lost" *)
 (* TODO: [ERR] EPIPE/broken pipe handling here or in handle_network io --- should consider as connection closed *)
 let tx_frame { oc; _ } f =
-  let bs = f |> Frame.to_bytes in
+  let bs = f |> F.to_bytes in
   let bs_len = Bytes.length bs in
   let%lwt () = Lwt_io.write_from_exactly oc bs 0 bs_len in
   Lwt_io.flush oc
@@ -117,6 +120,7 @@ let maybe_display_pending_acks { state = { pending_acks; _ }; _ } =
       pending_acks Lwt.return_unit
 
 let fini ({ on_fini; _ } as t) =
+  Lwt_io.printl "Finalising session..." >>= fun () ->
   maybe_display_pending_acks t >>= fun () ->
   on_fini () >>= fun () -> Lwt_io.printl "[Session cleaned up]"
 
@@ -134,7 +138,7 @@ let on_rcv_ack t msg_id =
       Lwt_io.eprint ("[WARNING]: " ^ msg ^ ". Ignoring this...")
 
 (* TODO: [ERR] EPIPE/broken pipe handling here *)
-let send_ack t id = Frame.Ack { id } |> tx_frame t
+let send_ack t id = F.Ack { id } |> tx_frame t
 
 let on_rcv_msg t id payload =
   let { on_rx_msg; _ } = get_cbs_exn t in
@@ -142,19 +146,19 @@ let on_rcv_msg t id payload =
   send_ack t id
 
 let rx_loop ({ frame_reader; _ } as t) =
-  let handle_fatal_error msg =
-    Lwt_io.eprintf "%s\n" msg >>= fun () -> Lwt.fail (Failure msg)
-  in
   let rec loop () =
-    Frame_reader.read_frame frame_reader >>= function
-    | Ok (Frame.Msg { id; payload }) -> on_rcv_msg t id payload >>= loop
-    | Ok (Frame.Ack { id }) -> on_rcv_ack t id >>= loop
-    | Ok Frame.Close -> on_peer_termination t
+    FR.read_frame frame_reader >>= function
+    | Ok (F.Msg { id; payload }) -> on_rcv_msg t id payload >>= loop
+    | Ok (F.Ack { id }) -> on_rcv_ack t id >>= loop
+    | Ok F.Close -> on_peer_termination t
     | Error (Connection_lost msg) ->
-        handle_fatal_error ("Connection lost @ [ Frame_reader ]: " ^ msg)
+        Lwt_io.printlf "[Conn lost --> Connection dropped --> normal: %s]" msg
+    (* TODO: [ERR] If this propagates up, it should be modded by session in some way *)
     | Error (Protocol_error frame_err) ->
-        handle_fatal_error
-          ("Frame error @ [ Frame_reader ]: " ^ Frame.error_to_string frame_err)
+        let err_msg =
+          "Frame error @ [ Frame_reader ]: " ^ F.error_to_string frame_err
+        in
+        Lwt_io.eprintf "%s\n" err_msg >>= fun () -> Lwt.fail (Failure err_msg)
   in
   loop ()
 
@@ -162,7 +166,7 @@ let tx_loop ({ state = { msg_queue; _ }; _ } as t) =
   let rec loop () =
     let%lwt payload = Lwt_mvar.take msg_queue in
     let id = next_msg_id t in
-    let%lwt () = tx_frame t (Frame.Msg { id; payload }) in
+    let%lwt () = tx_frame t (F.Msg { id; payload }) in
     track_pending_frame t id;
     loop ()
   in
@@ -170,16 +174,18 @@ let tx_loop ({ state = { msg_queue; _ }; _ } as t) =
 
 (* TODO: [ERR] create custom lwt errors to be handled*)
 (* TODO: [ERR] EPIPE/broken pipe handling here or in handle_network io --- should consider as connection closed *)
+(* TODO: [DESIGN] ALT DESIGN CHOICE: Consider the pattern: "Session.run should never propagate exceptions to its caller. It owns its lifecycle. The caller (accept_loop) just needs to know "session is done" — the reason doesn't change what accept_loop does next (unbind, wait for next client). Session logs the reason internally." *)
 let handle_network_io t =
-  try%lwt Lwt.join [ rx_loop t; tx_loop t ]
-  with e ->
-    let%lwt () =
-      Lwt_io.eprintf "Unexpected session error: %s\n" (Printexc.to_string e)
-    in
-    Lwt.fail e
+  try%lwt Lwt.pick [ rx_loop t; tx_loop t ] with
+  | Lwt.Canceled -> Lwt.return_unit
+  | e ->
+      let%lwt () =
+        Lwt_io.eprintf "Unexpected session error: %s\n" (Printexc.to_string e)
+      in
+      Lwt.fail e
 
 let run t =
   Lwt_io.printl "Running session..." >>= fun () ->
-  let handle_network_thunk = fun () -> handle_network_io t in
-  let fini_thunk = fun () -> fini t in
+  let handle_network_thunk () = handle_network_io t in
+  let fini_thunk () = fini t in
   Lwt.finalize handle_network_thunk fini_thunk

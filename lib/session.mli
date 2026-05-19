@@ -33,8 +33,9 @@ exception Rx_callbacks_not_binded of string
 val create :
   ic:Lwt_io.input_channel ->
   oc:Lwt_io.output_channel ->
-  callbacks:console_rx_callbacks option ->
-  on_fini:(unit -> unit Lwt.t) ->
+  ?callbacks:console_rx_callbacks option ->
+  ?on_fini:(unit -> unit Lwt.t) ->
+  unit ->
   t
 (** Create a session. Does not start I/O until [run] is called. *)
 

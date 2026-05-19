@@ -27,7 +27,7 @@ let register_listeners t fs =
   t
 
 let show_help () = Lwt_io.printl "Commands: /quit, /help"
-let fini t = Lwt_io.printl "Quitting..." >>= t.on_fini
+let fini t = Lwt_io.printl "Quitting the app console..." >>= t.on_fini
 
 type session_listener_factory = Session.t -> listener
 (** Creates a listener that needs to capture a [Session.t] because it relies on
@@ -75,7 +75,8 @@ let init_console t =
   in
   register_listeners t user_event_listeners
 
-let create ~ic ~oc ~on_fini =
+let create ?(ic = Lwt_io.stdin) ?(oc = Lwt_io.stdout)
+    ?(on_fini = fun () -> Lwt.return_unit) () =
   (* create the skeleton, init state, allow non-session bound listeners to exist *)
   let c = { session = None; listeners = ref []; ic; oc; on_fini } in
   init_console c
@@ -91,8 +92,9 @@ let format_msg_rx_bs payload =
 let make_console_rx_callbacks { oc; _ } =
   (* TODO [ERR:] stdout write failures to be handled (e.g. piping) -- treat as shutdown signal *)
   let on_rx_msg rx_bs =
-    let formatted_rx_payload = format_msg_rx_bs rx_bs in
-    Lwt_io.write_from_exactly oc formatted_rx_payload 0 (Bytes.length rx_bs)
+    let fmted_rx_payload = format_msg_rx_bs rx_bs in
+    let fmted_payload_len = Bytes.length fmted_rx_payload in
+    Lwt_io.write_from_exactly oc fmted_rx_payload 0 fmted_payload_len
   in
   let on_rx_close () = Lwt_io.printl "Your peer has left the chat" in
   let on_rx_ack id rtt = Lwt_io.printlf "Msg %ld Acked with rtt = %fs" id rtt in
@@ -127,13 +129,10 @@ let console_loop t =
       | Some e -> dispatch_event t e)
     >>= fun () -> loop ()
   in
-  try%lwt loop () (* TODO: [ERR] handle custom errors for console here *)
-  with End_of_file ->
-    let%lwt () = dispatch_event t UserEof in
-    Lwt.return ()
+  try%lwt loop () (* TODO: [ERR] handle custom errors for console here *) with
+  | End_of_file -> dispatch_event t UserEof
+  | Lwt.Canceled -> Lwt.return_unit
 
 let run t =
   Lwt_io.printl "Running console..." >>= fun () ->
-  let thunk = fun () -> console_loop t in
-  let cleaner_thunk = fun () -> fini t in
-  Lwt.finalize thunk cleaner_thunk
+  Lwt.finalize (fun () -> console_loop t) (fun () -> fini t)
