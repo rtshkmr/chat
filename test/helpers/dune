@@ -1,0 +1,6 @@
+(library
+ (name helpers)
+ (modules test_helpers test_payload)
+ (libraries chat alcotest alcotest-lwt lwt lwt.unix)
+ (preprocess
+  (pps lwt_ppx)))

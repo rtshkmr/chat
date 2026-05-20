@@ -4,13 +4,18 @@ build:
 	dune build
 
 test:
-	dune runtest
+	@if dune runtest; then \
+		echo "✅✅✅ 😌 All is good in the hood -- tests are passing "; \
+	else \
+		echo "⛔⛔️⛔️️ 🤯 Some tests have failed."; \
+		exit 1; \
+	fi
 
 watch:
 	dune build -w
 
 dev:
-	dune build @all @runtest -w
+	dune build @all @runtest -w || :
 
 utop:
 	dune utop

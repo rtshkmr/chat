@@ -282,6 +282,10 @@ An argument may be made that IF the finis are idempotent then we can use a [[htt
 *** User-input: Invalid port passed in
 
 -----
+** Layer: Memory Leaks
+Socket usage and such -- there's a need to ensure no mem leaks
+
+Would be nice to add this to my tests.
 
 * Knowledge Gaps and Learnings
 ** Tooling / Ecosystem Choices and Learnings

@@ -102,11 +102,16 @@ let to_bytes t =
   Bytes.blit (payload_of t) 0 frame fmt.frame_payload_off payload_sz;
   frame
 
-let make_frame id payload = function
-  | 0 -> Ok (Msg { id; payload })
-  | 1 -> Ok (Ack { id })
-  | 2 -> Ok Close
-  | tag -> Error (Unknown_frame_type tag)
+let make_frame id payload typ =
+  let payload_sz = Bytes.length payload in
+  match { id; typ; payload_sz } |> validate_header_meta with
+  | Error e -> Error e
+  | Ok _ -> (
+      match typ with
+      | 0 -> Ok (Msg { id; payload })
+      | 1 -> Ok (Ack { id })
+      | 2 -> Ok Close
+      | tag -> Error (Unknown_frame_type tag))
 
 let of_bytes bs =
   match parse_header_bytes bs with

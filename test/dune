@@ -1,3 +1,7 @@
 (test
  (name test_chat)
- (libraries chat alcotest))
+ (flags
+  (-w +a-40-42-70 -warn-error +a-40-42-70))
+ (libraries chat alcotest alcotest-lwt lwt lwt.unix helpers)
+ (preprocess
+  (pps lwt_ppx)))

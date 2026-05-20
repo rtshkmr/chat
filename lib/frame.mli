@@ -17,6 +17,9 @@ val frame_header_sz : int
 (** Frame headers are fixed size for Type-Length-Value frames. Frame Structure:
     [ 9B = <1B type><4B msg_id><4B payload_length> ] *)
 
+val max_payload_sz : int
+(** A limit on how big the payload can be (in B).*)
+
 val parse_and_validate_header_bytes : bytes -> (header_meta, error) result
 (** [parse_and_validate_header_bytes buf] parses the first
     [Frame.frame_header_sz] bytes of [buf] as a frame header and validates its
@@ -27,6 +30,7 @@ val to_bytes : t -> bytes
     byte-order (Big Endian).*)
 
 val make_frame : msg_id -> bytes -> int -> (t, error) result
+(** Makes a legal frame using [id] and [payload] and [typ] (with validation).*)
 
 val of_bytes : bytes -> (t, error) result
 (** Deserialises an entire byte-segment representing the whole frame (in network
