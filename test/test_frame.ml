@@ -1,10 +1,10 @@
 open Helpers.Test_helpers
 open Alcotest
 module F = Chat.Frame
-module Payload = Helpers.Test_payload
+module In = Helpers.Test_input
 module ALWT = Alcotest_lwt
 
-let make_legal_payload_test ({ desc; bytes; _ } : F.error option Payload.t) =
+let make_legal_payload_test ({ desc; bytes; _ } : F.error option In.t) =
   let test_name = Printf.sprintf "supports %s payload" desc in
   ALWT.test_case_sync test_name `Quick (fun () ->
       match F.make_frame 1l bytes 0 with
@@ -17,7 +17,7 @@ let make_legal_payload_test ({ desc; bytes; _ } : F.error option Payload.t) =
           Alcotest.failf "make_frame failed for %s: %s" desc
             (F.error_to_string e))
 
-let make_test_codec_case ({ desc; bytes; err } : F.error Payload.t) =
+let make_test_codec_case ({ desc; bytes; err } : F.error In.t) =
   let test_name = Printf.sprintf "rejects raw frame when %s" desc in
   ALWT.test_case_sync test_name `Quick (fun () ->
       match F.of_bytes bytes with
@@ -31,11 +31,10 @@ let make_test_codec_case ({ desc; bytes; err } : F.error Payload.t) =
                desc)
             err e)
 
-let test_byte_opaque_cases =
-  List.map make_legal_payload_test Payload.legal_payloads
+let test_byte_opaque_cases = List.map make_legal_payload_test In.legal_payloads
 
 let test_codec_illegal_byte_segment_cases =
-  List.map make_test_codec_case Helpers.Test_payload.illegal_serialised_frames
+  List.map make_test_codec_case In.illegal_serialised_frames
 
 let test_tlv_structure_test_cases =
   [

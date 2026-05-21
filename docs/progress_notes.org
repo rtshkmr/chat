@@ -220,6 +220,9 @@ This allows:
 *** Decision
 For explicit fd ownership, use =~close:Lwt.return= when creating channels from sockets.
 The =on_fini= callback becomes the single point of responsibility for closing the actual socket.
+** TODO [DOC] Test-writing Patterns: relying on test-generators and structured input types
+1. use test_frame_reader as the example for patterns included in using test-helpers
+
 
 * Error-/Failure-Modes
 

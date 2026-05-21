@@ -3,22 +3,40 @@ open Lwt.Infix
 module F = Frame
 module FR = Frame_reader
 
-type pipe = { rd : Lwt_io.input_channel; wr : Lwt_io.output_channel }
+type pipe = {
+  rd : Lwt_io.input_channel;
+  wr : Lwt_io.output_channel;
+  fd_rd : Lwt_unix.file_descr;
+  fd_wr : Lwt_unix.file_descr;
+}
 (** A named channel pair, write to [wr], read from [rd]. *)
 
-(* TODO: [REFACTOR] switch mechanism might be more elegant approach to actual code, where we can avoid having manual [fini] functions everywhere *)
+(** NOTE: idempotent closing, TODO[REFACTOR] consider this pattern for main
+    logic fd closers *)
 let make_pipe_with_switch switch =
   let fd_rd, fd_wr = Lwt_unix.pipe () in
   let rd = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.input fd_rd in
   let wr = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.output fd_wr in
-  let safe_close ch =
+
+  let safe_close_ch ch =
     Lwt.catch (fun () -> Lwt_io.close ch) (fun _ -> Lwt.return_unit)
   in
-  Lwt_switch.add_hook (Some switch) (fun () ->
-      safe_close wr >>= fun () ->
-      safe_close rd >>= fun () ->
-      Lwt_unix.close fd_wr >>= fun () -> Lwt_unix.close fd_rd);
-  { rd; wr }
+  let safe_close_fd fd =
+    Lwt.catch
+      (fun () -> Lwt_unix.close fd)
+      (function
+        | Unix.Unix_error (Unix.EBADF, _, _) -> Lwt.return_unit
+        | e -> Lwt.fail e)
+  in
+
+  let fini () =
+    safe_close_ch wr >>= fun () ->
+    safe_close_ch rd >>= fun () ->
+    safe_close_fd fd_wr >>= fun () -> safe_close_fd fd_rd
+  in
+
+  Lwt_switch.add_hook (Some switch) fini;
+  { rd; wr; fd_rd; fd_wr }
 
 type captured_output = {
   pipe : pipe;
