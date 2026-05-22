@@ -106,14 +106,18 @@ let host_arg =
     & info [ "host" ] ~docv:"HOST" ~doc)
 
 let run_server port bind timeout log_level =
-  try Lwt_main.run (Server.run ~port ~bind ~timeout ~log_level)
+  let terminal = Server.make_terminal_config ~log_level () in
+  let net = Server.{ bind; timeout; port } in
+  try Lwt_main.run (Server.run ~terminal ~net ())
   with e ->
     Lwt_io.eprintf "Fatal server error: %s\n%!" (Printexc.to_string e)
     |> Lwt_main.run;
     exit 1
 
 let run_client host port timeout log_level =
-  try Lwt_main.run (Client.run ~host ~port ~timeout ~log_level)
+  let terminal = Client.make_terminal_config ~log_level () in
+  let net = Client.{ host; timeout; port } in
+  try Lwt_main.run (Client.run ~terminal ~net ())
   with e ->
     Lwt_io.eprintf "Fatal client error: %s\n%!" (Printexc.to_string e)
     |> Lwt_main.run;

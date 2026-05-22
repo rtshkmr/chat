@@ -27,6 +27,8 @@ let make_pipe_with_switch switch =
       (function
         | Unix.Unix_error (Unix.EBADF, _, _) -> Lwt.return_unit
         | e -> Lwt.fail e)
+      (* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)
+      [@@warning "-4"]
   in
 
   let fini () =
@@ -114,7 +116,7 @@ let frame_reader_error_testable =
   Alcotest.testable pp ( = )
 
 (** Read exactly one frame from a pipe's read end, fail if error. *)
-let read_one_frame switch pipe =
+let read_one_frame _switch pipe =
   let reader = FR.create pipe.rd in
   match%lwt FR.read_frame reader with
   | Ok f -> Lwt.return f

@@ -12,6 +12,21 @@
 *)
 open Lwt.Infix
 
+type network_config = { port : int; bind : string; timeout : int }
+
+type terminal_config = {
+  ic : Lwt_io.input_channel;
+  oc : Lwt_io.output_channel;
+  log_level : Logs.level;
+}
+
+let make_terminal_config ?(ic = Lwt_io.stdin) ?(oc = Lwt_io.stdout)
+    ?(log_level = Logs.Info) () : terminal_config =
+  { ic; oc; log_level }
+
+(* let default_terminal_config : terminal_config = *)
+(*   { ic = Lwt_io.stdin; oc = Lwt_io.stdout; log_level = Logs.Info } *)
+
 let init_server_socket ~port ~bind =
   let%lwt () =
     Lwt_io.printlf "Starting server, to listen on %s:%d\n" bind port
@@ -44,13 +59,13 @@ let init_session client_socket =
   Session.create ~ic ~oc ~on_fini ()
 
 (* TODO handle custom errors for known cases *)
-let run_server port bind =
-  let%lwt server_socket = init_server_socket ~port ~bind in
+let run_with_socket ~sock ?(terminal = make_terminal_config ())
+    ~(net : network_config) () =
   let console = Console.create () in
   let rec accept_loop () =
     try%lwt
       let%lwt () = Lwt_io.printl "Awaiting chat connections..." in
-      let%lwt client_socket, _addr = Lwt_unix.accept server_socket in
+      let%lwt client_socket, _addr = Lwt_unix.accept sock in
       let session = init_session client_socket in
       let console = Console.bind_session console ~session in
       let%lwt () = Session.run session in
@@ -60,20 +75,24 @@ let run_server port bind =
   in
   let thunk () = Lwt.pick [ accept_loop (); Console.run console ] in
   let fini () =
-    Lwt_unix.close server_socket >>= fun () ->
-    Lwt_io.printl "[Server finalised]"
+    Lwt_unix.close sock >>= fun () -> Lwt_io.printl "[Server finalised]"
   in
   Lwt.finalize thunk fini
+[@@warning "-27"]
+(*TODO: wire up timeout and logging*)
 
-let run ~port ~bind ~timeout ~log_level =
-  try%lwt run_server port bind with
+let run ?(terminal = make_terminal_config ()) ~(net : network_config) () =
+  try%lwt
+    init_server_socket ~port:net.port ~bind:net.bind >>= fun sock ->
+    run_with_socket ~sock ~terminal ~net ()
+  with
   | Unix.Unix_error (Unix.EADDRINUSE, _, _) ->
-      Lwt_io.eprintf "Server Error: Port %d is already in use\n" port
+      Lwt_io.eprintf "Server Error: Port %d is already in use\n" net.port
       >>= fun () -> Lwt.fail_with "port in use"
   | Unix.Unix_error (Unix.EACCES, _, _) ->
       Lwt_io.eprintf
         "Error: Permission to run on port %d denied (ports < 1024 need root)\n"
-        port
+        net.port
       >>= fun () -> Lwt.fail_with "permission denied"
   | Failure msg ->
       Lwt_io.eprintf "Error: %s\n" msg >>= fun () -> Lwt.fail_with msg

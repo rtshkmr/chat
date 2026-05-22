@@ -1,5 +1,17 @@
 open Lwt.Infix
 
+type network_config = { port : int; host : string; timeout : int }
+
+type terminal_config = {
+  ic : Lwt_io.input_channel;
+  oc : Lwt_io.output_channel;
+  log_level : Logs.level;
+}
+
+let make_terminal_config ?(ic = Lwt_io.stdin) ?(oc = Lwt_io.stdout)
+    ?(log_level = Logs.Info) () : terminal_config =
+  { ic; oc; log_level }
+
 let init_client_socket ~host ~port =
   let%lwt addr_info =
     Lwt_unix.getaddrinfo host (string_of_int port) [ Unix.(AI_FAMILY PF_INET) ]
@@ -27,17 +39,19 @@ let run_client ~host ~port =
   in
   Lwt.finalize thunk fini
 
-let run ~host ~port ~timeout ~log_level =
-  let%lwt () = Lwt_io.printlf "Connecting client to %s:%d\n" host port in
-  try%lwt run_client ~host ~port with
+let run ?(terminal = make_terminal_config ()) ~(net : network_config) () =
+  let%lwt () =
+    Lwt_io.printlf "Connecting client to %s:%d\n" net.host net.port
+  in
+  try%lwt run_client ~host:net.host ~port:net.port with
   | Unix.Unix_error (Unix.EACCES, _, _) ->
       Lwt_io.eprintf
         "Error: Permission to run on port %d denied (ports < 1024 need root)\n"
-        port
+        net.port
       >>= fun () -> Lwt.fail_with "permission denied"
   | Unix.Unix_error (Unix.ECONNREFUSED, _, _) ->
       Lwt_io.eprintf "Error: Connection refused. Is server running @ %s:%d.\n"
-        host port
+        net.host net.port
       >>= fun () -> Lwt.fail_with "connection refused"
   | Failure msg ->
       Lwt_io.eprintf "Error: %s\n" msg >>= fun () -> Lwt.fail_with msg

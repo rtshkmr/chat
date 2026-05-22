@@ -10,7 +10,8 @@ type freader_streaming_input = {
   frames : F.t list;  (** for multiple dispatches *)
   intent : string;
 }
-(** Allows for multiple frame dispatches to verify frame boundaries @ incoming byte-stream (multiple frames in sequence)*)
+(** Allows for multiple frame dispatches to verify frame boundaries at incoming
+    byte-stream (multiple frames in sequence)*)
 
 type freader_edge_case_input = {
   name : string;
