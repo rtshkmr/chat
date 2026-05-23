@@ -28,9 +28,6 @@ let make_terminal_config ?(ic = Lwt_io.stdin) ?(oc = Lwt_io.stdout)
 (*   { ic = Lwt_io.stdin; oc = Lwt_io.stdout; log_level = Logs.Info } *)
 
 let init_server_socket ~port ~bind =
-  let%lwt () =
-    Lwt_io.printlf "Starting server, to listen on %s:%d\n" bind port
-  in
   let%lwt addr_info =
     Lwt_unix.getaddrinfo bind (string_of_int port) [ Unix.AI_FAMILY PF_INET ]
   in
@@ -46,7 +43,6 @@ let init_server_socket ~port ~bind =
       let server_socket = Lwt_unix.socket PF_INET SOCK_STREAM 0 in
       let%lwt () = Lwt_unix.bind server_socket addr.ai_addr in
       Lwt_unix.listen server_socket 1;
-      let%lwt () = Lwt_io.printlf "Server listening on %s:%d\n" bind port in
       Lwt.return server_socket
 
 let init_session client_socket =
@@ -59,31 +55,40 @@ let init_session client_socket =
   Session.create ~ic ~oc ~on_fini ()
 
 (* TODO handle custom errors for known cases *)
-let run_with_socket ~sock ?(terminal = make_terminal_config ())
-    ~(net : network_config) () =
-  let console = Console.create () in
+let run_with_socket ~sock ?(terminal = make_terminal_config ()) ~net () =
+  let starting_msg =
+    Printf.sprintf "Server listening on %s:%d\n" net.bind net.port
+  in
+  (* let%lwt () = Lwt_io.write_line terminal.oc starting_msg in *)
+  let console = Console.create ~ic:terminal.ic ~oc:terminal.oc () in
   let rec accept_loop () =
     try%lwt
-      let%lwt () = Lwt_io.printl "Awaiting chat connections..." in
+      (* let%lwt () = *)
+      (*   Lwt_io.write_line terminal.oc "Awaiting a new chat connection..." *)
+      (* in *)
       let%lwt client_socket, _addr = Lwt_unix.accept sock in
       let session = init_session client_socket in
       let console = Console.bind_session console ~session in
       let%lwt () = Session.run session in
+      (* TODO [REFACTOR]: consider if this unbind should be within a finaliser for this task instead *)
       let _ = Console.unbind_session console in
       accept_loop ()
     with Lwt.Canceled -> Lwt.return_unit
   in
   let thunk () = Lwt.pick [ accept_loop (); Console.run console ] in
   let fini () =
-    Lwt_unix.close sock >>= fun () -> Lwt_io.printl "[Server finalised]"
+    try%lwt Lwt_unix.close sock with _ -> Lwt.return_unit
+    (* (try%lwt Lwt_unix.close sock with _ -> Lwt.return_unit) >>= fun () -> *)
+    (* try%lwt Lwt_io.write_line terminal.oc "[Server finalised]" *)
+    (* with _ -> Lwt.return_unit *)
   in
   Lwt.finalize thunk fini
-[@@warning "-27"]
+[@@warning "-26"]
 (*TODO: wire up timeout and logging*)
 
 let run ?(terminal = make_terminal_config ()) ~(net : network_config) () =
   try%lwt
-    init_server_socket ~port:net.port ~bind:net.bind >>= fun sock ->
+    let%lwt sock = init_server_socket ~port:net.port ~bind:net.bind in
     run_with_socket ~sock ~terminal ~net ()
   with
   | Unix.Unix_error (Unix.EADDRINUSE, _, _) ->
@@ -97,7 +102,7 @@ let run ?(terminal = make_terminal_config ()) ~(net : network_config) () =
   | Failure msg ->
       Lwt_io.eprintf "Error: %s\n" msg >>= fun () -> Lwt.fail_with msg
   | e ->
-      Lwt_io.eprintf "Unexpected error: %s\n" (Printexc.to_string e)
+      Lwt_io.eprintf "Unexpected server error: %s\n" (Printexc.to_string e)
       >>= fun () -> Lwt.fail e
 [@@warning "-27-4"]
 (* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)

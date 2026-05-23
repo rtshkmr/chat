@@ -26,12 +26,16 @@ let dispatch_event t e =
       with e -> Lwt_io.eprintf "[Listener error: %s]\n" (Printexc.to_string e))
     !(t.listeners)
 
-let register_listeners t fs =
-  t.listeners := !(t.listeners) @ fs;
+let register_listeners t listeners =
+  (* TODO: [REFACTOR]: here and elsewhere, can use cons? *)
+  t.listeners := !(t.listeners) @ listeners;
   t
 
-let show_help () = Lwt_io.printl "Commands: /quit, /help"
-let fini t = Lwt_io.printl "Quitting the app console..." >>= t.on_fini
+let show_help t = Lwt_io.write_line t.oc "Commands: /quit, /help"
+
+let fini t =
+  let%lwt () = Lwt_io.write_line t.oc "Quitting the app console..." in
+  t.on_fini ()
 
 (* TODO [REFACTOR] on hindsight, this listener pattern doesn't feel right, maybe something more idiomatic that watches some lwt condition or something observer-like may be offerred by lwt actually *)
 type session_listener_factory = Session.t -> listener
@@ -63,13 +67,17 @@ type user_event_listener_factory = t -> listener
 
 let maybe_shutdown_session t =
   match t.session with
-  | None -> Lwt_io.printl "You're currently not in any chat, nothing to quit"
+  | None ->
+      Lwt_io.write_line t.oc "You're currently not in any chat, nothing to quit"
   | Some sess -> Session.shutdown sess
 
 (* TODO [CLEAN] consider whether t is needed *)
-let create_slash_cmd_listener _t : listener = function
-  | Slash_cmd "/help" -> show_help ()
-  | Slash_cmd cmd -> Lwt_io.printlf "Unknown slash command: %s\n" cmd
+(* FIXME: this is a problem, the listener pattern is a problem. we need t here *)
+let create_slash_cmd_listener t : listener = function
+  | Slash_cmd "/help" -> show_help t
+  | Slash_cmd cmd ->
+      let line = Printf.sprintf "Unknown slash command: %s\n" cmd in
+      Lwt_io.write_line t.oc line
   | _ -> Lwt.return_unit
 [@@warning "-4"]
 (* Listener pattern: User events of type [user_event] get dispatched to a collection of
@@ -78,9 +86,11 @@ let create_slash_cmd_listener _t : listener = function
 
 let create_no_session_listener t : listener = function
   | Send_msg _ when Option.is_none t.session ->
-      Lwt_io.printl
+      let msg =
         "[You're not in an active session. Wait for a client to connect before \
          sending messages...]"
+      in
+      Lwt_io.write_line t.oc msg
   | _ -> Lwt.return_unit
 [@@warning "-4"]
 (* Listener pattern: this doesn't care about any other event -- it just ignores*)
@@ -112,6 +122,7 @@ let make_on_rx_msg_cb oc =
       let fmted_rx_payload = format_msg_rx_bs rx_bs in
       let fmted_payload_len = Bytes.length fmted_rx_payload in
       Lwt_io.write_from_exactly oc fmted_rx_payload 0 fmted_payload_len
+      >>= fun () -> Lwt_io.flush oc
     with
     | Unix.Unix_error (Unix.EPIPE, _, _) ->
         Lwt_io.eprintf
@@ -127,8 +138,11 @@ let make_on_rx_msg_cb oc =
 
 let make_console_rx_callbacks { oc; _ } =
   let on_rx_msg = make_on_rx_msg_cb oc in
-  let on_rx_close () = Lwt_io.printl "Your peer has left the chat" in
-  let on_rx_ack id rtt = Lwt_io.printlf "Msg %ld Acked with rtt = %fs" id rtt in
+  let print s = Lwt_io.write_line oc s in
+  let on_rx_close () = print "Your peer has left the chat" in
+  let on_rx_ack id rtt =
+    print (Printf.sprintf "Msg %ld Acked with rtt = %fs" id rtt)
+  in
   { Session.on_rx_msg; on_rx_ack; on_rx_close }
 
 let bind_session t ~session =
@@ -172,21 +186,30 @@ let run_console t =
   try%lwt loop () with
   | End_of_file -> Lwt.return_unit
   | Lwt.Canceled -> Lwt.return_unit
+  | Lwt_io.Channel_closed _ ->
+      Lwt_io.eprintf "[Channel closed: Network or session died]\n"
   | Unix.Unix_error (e, op, arg) ->
       Lwt_io.eprintf "[Console I/O error: %s on %s %s]\n" (Unix.error_message e)
         op arg
   | e -> Lwt_io.eprintf "[Unknown Console error: %s]\n" (Printexc.to_string e)
 
-let handle_sigint =
-  let sigint_cond = Lwt_condition.create () in
-  let _ =
-    Lwt_unix.on_signal Sys.sigint (fun _ ->
-        print_endline "\nReceived <C-c>, time to call it quits";
-        Lwt_condition.broadcast sigint_cond ())
-  in
-  Lwt_condition.wait sigint_cond
+(* TODO [REFACTOR] : install signint at cli (top-level) *)
+(* let await_sigint { oc; _ } = *)
+(*   let c = Lwt_condition.create () in *)
+
+(*   let _handler = *)
+(*     let broadcast_sigint _ = *)
+(*       Lwt.async (fun () -> *)
+(*           Lwt_io.write_line oc "\nReceived <C-c>, time to call it quits"); *)
+(*       Lwt_condition.broadcast c () *)
+(*     in *)
+(*     Lwt_unix.on_signal Sys.sigint broadcast_sigint *)
+(*   in *)
+(*   Lwt_condition.wait c *)
+(* [@@warning "-32"] *)
 
 let run t =
-  Lwt_io.printl "Running console..." >>= fun () ->
-  let thunk () = Lwt.pick [ run_console t; handle_sigint ] in
+  let%lwt () = Lwt_io.write_line t.oc "Running console..." in
+  (* let thunk () = Lwt.pick [ run_console t; await_sigint t ] in *)
+  let thunk () = run_console t in
   Lwt.finalize thunk (fun () -> fini t)

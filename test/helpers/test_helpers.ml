@@ -40,28 +40,33 @@ let make_pipe_with_switch switch =
   Lwt_switch.add_hook (Some switch) fini;
   { rd; wr; fd_rd; fd_wr }
 
-type captured_output = {
+type capture_spy = {
   pipe : pipe;
   lines : string list ref;
-  task : unit Lwt.t;
+  capture_task : unit Lwt.t;
 }
 
 (** NOTE: switch is threaded in to consolidate cleanup routines *)
-let capture_output switch =
+let make_output_spy switch =
   let p = make_pipe_with_switch switch in
   let lines = ref [] in
-  let task =
-    let rec loop () =
-      let%lwt line = Lwt_io.read_line p.rd in
-      lines := !lines @ [ line ];
-      loop ()
-    in
-    Lwt.catch loop (function
-      | End_of_file -> Lwt.return_unit
-      | Lwt.Canceled -> Lwt.return_unit
-      | e -> Lwt.fail e)
+
+  let rec read_and_capture_line_loop () =
+    let%lwt line = Lwt_io.read_line p.rd in
+    lines := line :: !lines;
+    (* ^works well, most recent line is at head *)
+    (* lines := !lines @ [ line ]; *)
+    read_and_capture_line_loop ()
   in
-  { pipe = p; lines; task }
+
+  let capture_task =
+    try%lwt read_and_capture_line_loop () with
+    | End_of_file | Lwt.Canceled | Lwt_io.Channel_closed _ -> Lwt.return_unit
+    | Unix.Unix_error _ ->
+        Lwt.return_unit (* e.g. pipe fd closed during teardown *)
+    | e -> Lwt.fail e
+  in
+  { pipe = p; lines; capture_task }
 
 let captured_text cap = String.concat "\n" !(cap.lines)
 

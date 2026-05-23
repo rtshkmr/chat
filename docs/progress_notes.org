@@ -317,7 +317,130 @@ When supervising infinite loops (like =accept_loop=) with =Lwt.pick=
 
 Without this, we may see deterministic output ordering issues where cleanup
 prints before the cancelled task has a chance to exit gracefully.
+** Lwt Sytax Sugar Trip-ups
+There's a bunch of places where I ended up getting stuck because of use / lack of use of lwt syntax sugars.
 
+for example,   on a quick read, I didn't register that this is a eager promise evaluation so the task has already been started at the point after we call =Lwt.catch=.
+
+#+caption: using the Lwt.catch syntax somehow made me thing that the task hasn't been started yet
+#+begin_src ocaml
+(** NOTE: switch is threaded in to consolidate cleanup routines *)
+let make_output_spy switch =
+  let p = make_pipe_with_switch switch in
+  let lines = ref [] in
+  let capture_task =
+    let rec read_and_capture_line_loop () =
+      let%lwt line = Lwt_io.read_line p.rd in
+      lines := !lines @ [ line ];
+      read_and_capture_line_loop ()
+    in
+    Lwt.catch read_and_capture_line_loop (function
+      | End_of_file -> Lwt.return_unit
+      | Lwt.Canceled -> Lwt.return_unit
+      | Lwt_io.Channel_closed _ -> Lwt.return_unit
+      | e -> Lwt.fail e)
+  in
+  { pipe = p; lines; capture_task }
+#+end_src
+
+it's because I'vebeen using the sugar form =try%lwt ... with= ...
+#+caption: my preferred approach that makes the eager evaluation of promises clearer to me
+#+begin_src ocaml
+(** NOTE: switch is threaded in to consolidate cleanup routines *)
+let make_output_spy switch =
+  let p = make_pipe_with_switch switch in
+  let lines = ref [] in
+
+  let rec read_and_capture_line_loop () =
+    let%lwt line = Lwt_io.read_line p.rd in
+    lines := !lines @ [ line ];
+    read_and_capture_line_loop ()
+  in
+
+  let capture_task =
+    try%lwt read_and_capture_line_loop () with
+    | End_of_file -> Lwt.return_unit
+    | Lwt.Canceled -> Lwt.return_unit
+    | Lwt_io.Channel_closed _ -> Lwt.return_unit
+  in
+
+  { pipe = p; lines; capture_task }
+#+end_src
+
+this took a LONG time to debug (when creating the e2e test harnesses) because I kept brushing over this part and not realising that the task had already been called so I didn't even consider lifecycle problems here and was chasing termination problems.
+
+Anyway the purpose of capturing the task like that is so that we can await it's completion later (explicit teardown).
+
+* Refactor
+
+** Patterns
+There are some useful patterns that exist that should be encouraged in areas that they may be relevant but aren't there yet:
+1. error handling patterns
+   a) should the network errors also be wrapped as custom errors? technically what matters is how they're handled so it's more of a routing it to the correct effect is what's importatnt here
+   b)
+**  Antipatterns
+*** [ ] explore the use of a common process switch which should make it easier to manage lifecycle
+
+- the test harness have such a switch, it's something primitive to alcotest-lwt too. That pattern is beautiful, but resource management and timing needs to be handled well so that we don't end up doing writes to closed channels and so on
+- currently using the callback pattern can be really horrible because of the classic callback hell, though the purpose of the callbacks is limited to just displaying things so it's not that risky yet -- though it's also good to NOT allow future evolution into callback hell because of bad decision now
+
+*** [ ] simplify: no more factories, no more listeners
+ - it's tagged in the code already
+ - the main objective is: "when user types text, send it via session; when user types /quit, shutdown session; when no session, show a message". This doesn't need a listener pattern with observers and so on --- which would make it harder to trace code
+   a) The listener pattern would likely be relevant if we had plugin-style extensibility or if listeners were added/removed at runtime by external code.
+   b) most likely ideal place to introduce this: For now, the 2-phase session init, with console binding session and unbinding session gives a clean commit point on when to handle the /dispatchability/.
+
+  *Verdict: This needs to be done. it should be possible to just do a giant dispatch table*
+**  Chores
+*** [ ] 1: string enums in one place
+ - central place for display messages and strings =lib/text/session_text.ml=
+ - makes test-writing more maintainable
+ - helper msg (e.g. slash helper cmd)
+ - prefix patterns
+ - display formatters
+*** [ ] 2: Add render_cb functions similar to the
+*** [ ]  standardise everything to lwt infix syntax
+ - [ ] no Cancel, just =try%lwt=
+    - it tripped me up once before
+ - [ ] Dont use monad bind op (~>>=~), use the structured form  instead (=let%lwt () ==)
+    - feels more like structured concurrency -- easier to read imo
+*** [ ]
+*** [ ] simplify the module ref names
+ - e.g. =Lwt_io= -> =LIO=
+* Backlog
+** [ ] Connection Timeout
+What kind of half-decent network protocol has no timeout?
+** [ ] Include logging
+Can't imagine life without it but it's also a lot of config work that can be spent on improving the actual code
+
+*Verdict: deferred to the end*
+
+** [ ] Busy messages because we can't rely on OS-level rejection for deterministic test / rejection behaviour
+
+The kernel enforces a minimum effective backlog — on modern Linux kernels, listen(fd, 0) is silently treated as listen(fd, 1) (or sometimes higher, depending on net.core.somaxconn and kernel version). POSIX says the backlog is a hint, not a contract.
+
+So need some app-logic for this.
+
+Accept the connection, send a Close frame (or a new Busy frame type if you want to be explicit), then close the socket.
+
+Sketch:
+
+#+begin_src ocaml
+(* In accept_loop, when session is active *)
+| Some _active_session ->
+    let%lwt client_socket, _ = Lwt_unix.accept server_socket in
+    (* Reject: send Close frame and disconnect *)
+    let oc = Lwt_io.of_fd ~close:Lwt.return ~mode:Output client_socket in
+    let%lwt () = Lwt_io.write_from_exactly oc (Frame.to_bytes Frame.Close) 0 ... in
+    let%lwt () = Lwt_io.flush oc in
+    Lwt_unix.close client_socket
+
+
+#+end_src
+
+But this requires restructuring =accept_loop= to not block on =Session.run= — you'd need to =Lwt.async= the session and keep accepting. That's the multiplexing evolution path
+
+*Current verdict: Deferred till everything is done*
 * Future Extension Considerations
 -----
 

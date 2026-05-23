@@ -116,19 +116,29 @@ let maybe_display_pending_acks { state = { pending_acks; _ }; _ } =
         acc >>= fun () ->
         Lwt_io.printl (Printf.sprintf "Msg %ld sent at %.3f" msg_id time))
       pending_acks Lwt.return_unit
+[@@warning "-32"]
+(* TODO [REFACTOR, TEST]  <render cb> figure out the displayign callback needs *)
 
 let send_ack t id = F.Ack { id } |> tx_frame t
 let send_close t = F.Close |> tx_frame t
 
 let shutdown t =
-  send_close t >>= fun () ->
+  let%lwt () = send_close t in
   Lwt_condition.signal t.shutdown_cond ();
   Lwt.return_unit
 
 let fini ({ on_fini; _ } as t) =
-  Lwt_io.printl "Finalising session..." >>= fun () ->
-  maybe_display_pending_acks t >>= fun () ->
-  on_fini () >>= fun () -> Lwt_io.printl "[Session cleaned up]"
+  (* TODO: [LOG] -- these need to be piped to log formatter, can't add io deps to the console side for printing (don't want to introduce this new pattern)
+   - this includes the maybe display -- maybe there's value to having a publish_display or such a callback
+*)
+  (* let%lwt () = Lwt_io.write_line oc "Finalising session..." in *)
+  (* let%lwt () = Lwt_io.printl "Finalising session..." in *)
+  (* let%lwt () = maybe_display_pending_acks t in *)
+  (* let%lwt () = Lwt_io.write_line oc "[Session cleaned up]" in *)
+  (* let%lwt () = Lwt_io.printl "[Session cleaned up]" in *)
+  on_fini ()
+[@@warning "-26"]
+(* TODO [REFACTOR, TEST]  <render cb> figure out the displayign callback needs *)
 
 let on_peer_termination t =
   let cbs = get_cbs_exn t in
@@ -148,14 +158,17 @@ let on_rcv_msg t id payload =
   let%lwt () = on_rx_msg payload in
   send_ack t id
 
-let rx_loop ({ frame_reader; _ } as t) =
+let rx_loop ({ frame_reader; oc; _ } as t) =
   let rec loop () =
     FR.read_frame frame_reader >>= function
     | Ok (F.Msg { id; payload }) -> on_rcv_msg t id payload >>= loop
     | Ok (F.Ack { id }) -> on_rcv_ack t id >>= loop
     | Ok F.Close -> on_peer_termination t
     | Error (Connection_lost msg) ->
-        Lwt_io.printlf "[Conn lost --> Connection dropped --> normal: %s]" msg
+        let line =
+          Printf.sprintf "[Conn lost -> graceful term: (reason) %s]" msg
+        in
+        Lwt_io.write_line oc line
     (* TODO: [ERR] If this propagates up, it should be modded by session in some way *)
     | Error (Protocol_error frame_err) ->
         let err_msg =
@@ -184,8 +197,10 @@ let handle_network_io t =
   try%lwt Lwt.pick [ rx_loop t; tx_loop t; await_shutdown_signal t ] with
   | Lwt.Canceled -> Lwt.return_unit
   | Unix.Unix_error (Unix.ECONNRESET, _, _) ->
+      (* Lwt.return_unit *)
       Lwt_io.eprintf "Peer disconnected, connection reset\n"
   | Unix.Unix_error (Unix.EPIPE, _, _) ->
+      (* Lwt.return_unit *)
       Lwt_io.eprintf "Broken pipe: peer closed connection\n"
   | e ->
       let%lwt () =
@@ -196,7 +211,8 @@ let handle_network_io t =
 (* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)
 
 let run t =
-  Lwt_io.printl "Running session..." >>= fun () ->
+  (* let%lwt () = Lwt_io.write_line t.oc "Running session" in *)
+  (* Lwt_io.printl "Running session..." >>= fun () -> *)
   let handle_network_thunk () = handle_network_io t in
   let fini_thunk () = fini t in
   Lwt.finalize handle_network_thunk fini_thunk

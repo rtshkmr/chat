@@ -4,8 +4,16 @@ build:
 	dune build
 
 test:
-	@if dune runtest; then \
+	@if dune runtest -j auto; then \
 		echo "✅✅✅ 😌 All is good in the hood -- tests are passing "; \
+	else \
+		echo "⛔⛔️⛔️️ 🤯 Some tests have failed."; \
+		exit 1; \
+	fi
+
+nuketest:
+	@if dune clean && dune build && dune runtest; then \
+		echo "✅✅✅ 😌 All is good in the nuclear hood -- tests are passing after nuking"; \
 	else \
 		echo "⛔⛔️⛔️️ 🤯 Some tests have failed."; \
 		exit 1; \

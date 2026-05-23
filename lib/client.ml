@@ -29,21 +29,43 @@ let init_session sock =
   let on_fini () = Lwt_io.close oc >>= fun () -> Lwt_io.close ic in
   Session.create ~ic ~oc ~on_fini ()
 
-let run_client ~host ~port =
-  let%lwt sock = init_client_socket ~host ~port in
+let run_client ~terminal ~net =
+  let%lwt sock = init_client_socket ~host:net.host ~port:net.port in
   let session = init_session sock in
-  let console = Console.create () |> Console.bind_session ~session in
+  let ic, oc = (terminal.ic, terminal.oc) in
+  let console = Console.create ~ic ~oc () |> Console.bind_session ~session in
   let thunk () = Lwt.pick [ Session.run session; Console.run console ] in
+
   let fini () =
-    Lwt_unix.close sock >>= fun () -> Lwt_io.printl "[Finalised client]"
+    let%lwt () = try%lwt Lwt_unix.close sock with _ -> Lwt.return_unit in
+    try%lwt Lwt_io.write_line oc "[Finalised client]"
+    with _ -> Lwt.return_unit
   in
+
   Lwt.finalize thunk fini
+
+(* let fini () = *)
+(*   ( try%lwt Lwt_unix.close sock with _ -> Lwt.return_unit in *)
+(*   try%lwt Lwt_io.write_line oc "[Finalised client]" with _ -> Lwt.return_unit ) in *)
+(* Lwt.finalize thunk fini *)
+
+(* Lwt.catch (fun () -> Lwt_unix.close sock) (fun _ -> Lwt.return_unit) *)
+(* >>= fun () -> *)
+(* Lwt.catch *)
+(*   (fun () -> Lwt_io.write_line oc "[Finalised client]") *)
+(*   (fun _ -> Lwt.return_unit) *)
+(* in *)
+(* let fini () = *)
+(*   Lwt_unix.close sock >>= fun () -> Lwt_io.write_line oc "[Finalised client]" *)
+(* in *)
+(* Lwt.finalize thunk fini *)
 
 let run ?(terminal = make_terminal_config ()) ~(net : network_config) () =
   let%lwt () =
-    Lwt_io.printlf "Connecting client to %s:%d\n" net.host net.port
+    Lwt_io.write_line terminal.oc
+      (Printf.sprintf "Connecting client to %s:%d\n" net.host net.port)
   in
-  try%lwt run_client ~host:net.host ~port:net.port with
+  try%lwt run_client ~terminal ~net with
   | Unix.Unix_error (Unix.EACCES, _, _) ->
       Lwt_io.eprintf
         "Error: Permission to run on port %d denied (ports < 1024 need root)\n"
@@ -56,7 +78,7 @@ let run ?(terminal = make_terminal_config ()) ~(net : network_config) () =
   | Failure msg ->
       Lwt_io.eprintf "Error: %s\n" msg >>= fun () -> Lwt.fail_with msg
   | e ->
-      Lwt_io.eprintf "Unexpected error: %s\n" (Printexc.to_string e)
+      Lwt_io.eprintf "Unexpected client error: %s\n" (Printexc.to_string e)
       >>= fun () -> Lwt.fail e
 [@@warning "-27-4"]
 (* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)

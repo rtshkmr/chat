@@ -95,7 +95,7 @@ let test_error_message_cases =
 let suite =
   [
     ("Frame/Codec/TLV-framing-invariants", test_tlv_structure_test_cases);
-    ("Frame/Codec/Byte-opaque", test_byte_opaque_cases);
+    ("Frame/Codec/Payload/Byte-opaque", test_byte_opaque_cases);
     ("Frame/Codec/Invalid-byte-segments", test_codec_illegal_byte_segment_cases);
     ("Frame/Error-messages", test_error_message_cases);
   ]
