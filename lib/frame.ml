@@ -5,29 +5,12 @@ type t =
   | Ack of { id : msg_id }
   | Close
 
-type frame_format_info = {
-  frame_header_sz : int;
-  frame_payload_off : int;
-  frame_type_off : int;
-  frame_id_off : int;
-  frame_payload_sz_off : int;
-}
-
-(* Frame Headers are fixed size,
-    [ 9B = <1B type><4B msg_id><4B payload_length> ] *)
-let frame_header_sz = 9
-let max_payload_sz = 1_000_000 (* 1MB max*)
-
-let frame_format =
-  {
-    frame_header_sz;
-    frame_payload_off = frame_header_sz;
-    frame_type_off = 0;
-    frame_id_off = 1;
-    frame_payload_sz_off = 5;
-  }
-
-let fmt = frame_format
+let hdr_size = 9
+let payload_offset = hdr_size
+let type_offset = 0
+let id_offset = 1
+let payload_size_offset = 5
+let max_payload_size = 1_000_000 (* 1MB max*)
 
 type error =
   | Header_too_short
@@ -35,12 +18,19 @@ type error =
   | Unknown_frame_type of int
   | Payload_too_big of { sz : int; max : int }
 
-let error_to_string = function
-  | Header_too_short -> "Frame header too short"
-  | Payload_too_short -> "Frame payload incomplete"
-  | Unknown_frame_type tag -> Printf.sprintf "Unknown frame type: %d" tag
+let pp fmt = function
+  | Msg { id; payload } ->
+      Format.fprintf fmt "Msg { id=%ld; payload_size=%d }" id
+        (Bytes.length payload)
+  | Ack { id } -> Format.fprintf fmt "Ack { id=%ld }" id
+  | Close -> Format.fprintf fmt "Close"
+
+let pp_error fmt = function
+  | Header_too_short -> Format.fprintf fmt "Frame header too short"
+  | Payload_too_short -> Format.fprintf fmt "Frame payload incomplete"
+  | Unknown_frame_type tag -> Format.fprintf fmt "Unknown frame type: %d" tag
   | Payload_too_big { sz; max } ->
-      Printf.sprintf "Payload is to big (%dB). Max %dB allowed." sz max
+      Format.fprintf fmt "Payload too big (%dB). Max %dB allowed." sz max
 
 let type_of = function Msg _ -> 0 | Ack _ -> 1 | Close -> 2
 
@@ -64,9 +54,9 @@ let header_meta_of t =
 
 let validate_payload_sz payload_sz =
   if payload_sz < 0 then
-    Error (Payload_too_big { sz = payload_sz; max = max_payload_sz })
-  else if payload_sz > max_payload_sz then
-    Error (Payload_too_big { sz = payload_sz; max = max_payload_sz })
+    Error (Payload_too_big { sz = payload_sz; max = max_payload_size })
+  else if payload_sz > max_payload_size then
+    Error (Payload_too_big { sz = payload_sz; max = max_payload_size })
   else Ok ()
 
 let validate_header_meta { typ; payload_sz; _ } =
@@ -75,14 +65,13 @@ let validate_header_meta { typ; payload_sz; _ } =
   | _ -> Error (Unknown_frame_type typ)
 
 let parse_header_bytes bs =
-  if Bytes.length bs < fmt.frame_header_sz then Error Header_too_short
+  if Bytes.length bs < hdr_size then Error Header_too_short
   else
     Ok
       {
-        typ = Bytes.get_uint8 bs fmt.frame_type_off;
-        id = Bytes.get_int32_be bs fmt.frame_id_off;
-        payload_sz =
-          Bytes.get_int32_be bs fmt.frame_payload_sz_off |> Int32.to_int;
+        typ = Bytes.get_uint8 bs type_offset;
+        id = Bytes.get_int32_be bs id_offset;
+        payload_sz = Bytes.get_int32_be bs payload_size_offset |> Int32.to_int;
       }
 
 let parse_and_validate_header_bytes buf =
@@ -95,11 +84,11 @@ let parse_and_validate_header_bytes buf =
 
 let to_bytes t =
   let { typ; id; payload_sz } = header_meta_of t in
-  let frame = fmt.frame_header_sz + payload_sz |> Bytes.create in
-  Bytes.set_uint8 frame fmt.frame_type_off typ;
-  Bytes.set_int32_be frame fmt.frame_id_off id;
-  Bytes.set_int32_be frame fmt.frame_payload_sz_off (Int32.of_int payload_sz);
-  Bytes.blit (payload_of t) 0 frame fmt.frame_payload_off payload_sz;
+  let frame = hdr_size + payload_sz |> Bytes.create in
+  Bytes.set_uint8 frame type_offset typ;
+  Bytes.set_int32_be frame id_offset id;
+  Bytes.set_int32_be frame payload_size_offset (Int32.of_int payload_sz);
+  Bytes.blit (payload_of t) 0 frame payload_offset payload_sz;
   frame
 
 let make_frame id payload typ =
@@ -117,11 +106,10 @@ let of_bytes bs =
   match parse_header_bytes bs with
   | Error e -> Error e
   | Ok { id; typ; payload_sz } ->
-      if Bytes.length bs < fmt.frame_header_sz + payload_sz then
-        Error Payload_too_short
+      if Bytes.length bs < hdr_size + payload_sz then Error Payload_too_short
       else
         let payload =
           if payload_sz = 0 then Bytes.empty
-          else Bytes.sub bs fmt.frame_header_sz payload_sz
+          else Bytes.sub bs hdr_size payload_sz
         in
         make_frame id payload typ

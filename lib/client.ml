@@ -23,6 +23,12 @@ let init_client_socket ~host ~port =
       let%lwt () = Lwt_unix.connect socket addr.Unix.ai_addr in
       Lwt.return socket
 
+(** TODO: [FINI] client should close the underlying socket her most likely else
+    there's 2 cleanup sites for the same resource hierarchy — only the channels.
+    But those channels were created with ~close:Lwt.return which means closing
+    them doesn't close the fd. So sock never gets properly closed via on_fini.
+    The fini () in run_client closes sock, so there's a correct cleanup path,
+    but it's only because of Lwt.finalize at the supervisor/harness level *)
 let init_session sock =
   let ic = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.input sock in
   let oc = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.output sock in
@@ -31,6 +37,7 @@ let init_session sock =
 
 let run_client ~terminal ~net =
   let%lwt sock = init_client_socket ~host:net.host ~port:net.port in
+  (* TODO [POLISH]: add an endpoint struct with connection info about the chat that can be used for the irc-like promp *)
   let session = init_session sock in
   let ic, oc = (terminal.ic, terminal.oc) in
   let console = Console.create ~ic ~oc () |> Console.bind_session ~session in
@@ -67,19 +74,26 @@ let run ?(terminal = make_terminal_config ()) ~(net : network_config) () =
   in
   try%lwt run_client ~terminal ~net with
   | Unix.Unix_error (Unix.EACCES, _, _) ->
-      Lwt_io.eprintf
-        "Error: Permission to run on port %d denied (ports < 1024 need root)\n"
-        net.port
-      >>= fun () -> Lwt.fail_with "permission denied"
+      let%lwt () =
+        Lwt_io.eprintf
+          "Error: Permission to run on port %d denied (ports < 1024 need root)\n"
+          net.port
+      in
+      Lwt.fail_with "permission denied"
   | Unix.Unix_error (Unix.ECONNREFUSED, _, _) ->
-      Lwt_io.eprintf "Error: Connection refused. Is server running @ %s:%d.\n"
-        net.host net.port
-      >>= fun () -> Lwt.fail_with "connection refused"
+      let%lwt () =
+        Lwt_io.eprintf "Error: Connection refused. Is server running @ %s:%d.\n"
+          net.host net.port
+      in
+      Lwt.fail_with "connection refused"
   | Failure msg ->
-      Lwt_io.eprintf "Error: %s\n" msg >>= fun () -> Lwt.fail_with msg
+      let%lwt () = Lwt_io.eprintf "Error: %s\n" msg in
+      Lwt.fail_with msg
   | e ->
-      Lwt_io.eprintf "Unexpected client error: %s\n" (Printexc.to_string e)
-      >>= fun () -> Lwt.fail e
-[@@warning "-27-4"]
+      let%lwt () =
+        Lwt_io.eprintf "Unexpected client error: %s\n" (Printexc.to_string e)
+      in
+      Lwt.fail e
+[@@warning "-4"]
 (* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)
 (*-- TODO: [STUB] wire up log levels and conn timeout. timeout needs to be used so need auto-cancellations and all that *)

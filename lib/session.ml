@@ -1,12 +1,34 @@
+(* TODO: [ERR] capture user errors well -- session needs custom errors *)
 open Lwt.Infix
 module F = Frame
 module FR = Frame_reader
 
-type console_rx_callbacks = {
-  on_rx_msg : bytes -> unit Lwt.t;
-  on_rx_ack : F.msg_id -> float -> unit Lwt.t;
-  on_rx_close : unit -> unit Lwt.t;
-}
+let pp_timestamp fmt ts =
+  let tm = Unix.localtime ts in
+  let ms = int_of_float ((ts -. floor ts) *. 1000.) in
+  Format.fprintf fmt "%04d-%02d-%02d %02d:%02d:%02d.%03d" (tm.tm_year + 1900)
+    (tm.tm_mon + 1) tm.tm_mday tm.tm_hour tm.tm_min tm.tm_sec ms
+
+let pp_prompt fmt ts = Format.fprintf fmt "[@[%a@]]" pp_timestamp ts
+
+type rx_event =
+  | Msg_received of { id : F.msg_id; content : bytes; rcvd_at : float }
+  | Ack_received of { id : Frame.msg_id; rtt : float; rcvd_at : float }
+  | Peer_closed of { rcvd_at : float }
+
+(* let pp_msg_rcvd {id; content} = *)
+
+let pp_display_event fmt = function
+  | Msg_received { id; content; rcvd_at } ->
+      let len = Bytes.length content in
+      Format.fprintf fmt "◉ ➤ %a <rx:#%ld> [%dB]" pp_prompt rcvd_at id len
+  | Ack_received { id; rtt; rcvd_at } ->
+      Format.fprintf fmt "◉ 🗸 %a <ack:#%ld> rtt=%.6fs\n" pp_prompt rcvd_at id
+        rtt
+  | Peer_closed { rcvd_at } ->
+      Format.fprintf fmt "◎ ☣︎ %a <peer> disconnected\n" pp_prompt rcvd_at
+
+type console_callbacks = { on_rx : rx_event -> unit Lwt.t }
 
 type state = {
   msg_id_counter : int32 ref;
@@ -14,27 +36,25 @@ type state = {
   msg_queue : bytes Lwt_mvar.t;  (** Used for coordinating payloads for tx*)
 }
 
+(* TODO[POLISH] consider renaming ic/oc to net_ic/net_oc *)
 type t = {
-  ic : Lwt_io.input_channel;
   oc : Lwt_io.output_channel;
   on_fini : unit -> unit Lwt.t;
-  callbacks : console_rx_callbacks option ref;
+  callbacks : console_callbacks option ref;
   state : state;
   frame_reader : FR.t;
   shutdown_cond : unit Lwt_condition.t;
 }
-[@@warning "-69"]
-(*[ic] is not being used but that's a design things to be relooked at. [ frame_reader ] ends up getting constructed so [ic] is within that, but then [oc] is left alone if we just remove [ic] from t. I guess this is alright? TODO: consider this from a design pov*)
 
 type error =
   | Msg_not_pending_ack of int32
   | Network_error of string
-  | Frame_error of F.error
+  | Frame_reader_error of FR.error
 
-let error_to_string = function
-  | Msg_not_pending_ack id -> Printf.sprintf "Msg %ld is not pending ack" id
-  | Network_error err_str -> Printf.sprintf "Network error: %s" err_str
-  | Frame_error e -> F.error_to_string e
+let pp_error fmt = function
+  | Msg_not_pending_ack id -> Format.fprintf fmt "Msg %ld is not pending ack" id
+  | Network_error err_str -> Format.fprintf fmt "Network error: %s" err_str
+  | Frame_reader_error e -> Format.fprintf fmt "%a" FR.pp_error e
 
 exception Rx_callbacks_not_binded of string
 
@@ -48,7 +68,6 @@ let init_state () =
 let create ~ic ~oc ?(callbacks = None) ?(on_fini = fun () -> Lwt.return_unit) ()
     =
   {
-    ic;
     oc;
     callbacks = ref callbacks;
     state = init_state ();
@@ -83,11 +102,11 @@ let track_pending_frame t msg_id =
   let start_time = Unix.gettimeofday () in
   Hashtbl.add t.state.pending_acks msg_id start_time
 
-let resolve_and_get_delivery_rtt { state = { pending_acks; _ }; _ } msg_id =
+let resolve_and_get_sent_at { state = { pending_acks; _ }; _ } msg_id =
   match Hashtbl.find_opt pending_acks msg_id with
   | Some ts ->
       Hashtbl.remove pending_acks msg_id;
-      Ok (Unix.gettimeofday () -. ts)
+      Ok ts
   | None -> Error (Msg_not_pending_ack msg_id)
 
 (** TODO: [DOCS] document exn raised *)
@@ -101,15 +120,17 @@ let get_cbs_exn { callbacks; _ } =
       raise (Rx_callbacks_not_binded expectation)
   | Some cbs -> cbs
 
+(* TODO: [REFACTOR, TEST] <render cb> -- this function is ugly, can avoid materialising and make this faster. Also should likely just be converted to pretty printers *)
 let maybe_display_pending_acks { state = { pending_acks; _ }; _ } =
   let num_pending = Hashtbl.length pending_acks in
   if num_pending = 0 then Lwt.return_unit
   else
+    let%lwt () =
+      Lwt_io.printl
+        "Terminating this chat session before all sent msgs have been ack-ed."
+    in
     (* print header first *)
-    Lwt_io.printl
-      "Terminating this chat session before all sent msgs have been ack-ed."
-    >>= fun () ->
-    Lwt_io.printlf "%d Pending Acks for:" num_pending >>= fun () ->
+    let%lwt () = Lwt_io.printlf "%d Pending Acks for:" num_pending in
     (* print each entry directly *)
     Hashtbl.fold
       (fun msg_id time acc ->
@@ -141,21 +162,25 @@ let fini ({ on_fini; _ } as t) =
 (* TODO [REFACTOR, TEST]  <render cb> figure out the displayign callback needs *)
 
 let on_peer_termination t =
-  let cbs = get_cbs_exn t in
-  cbs.on_rx_close ()
+  let rcvd_at = Unix.gettimeofday () in
+  let { on_rx; _ } = get_cbs_exn t in
+  Peer_closed { rcvd_at } |> on_rx
 
 let on_rcv_ack t msg_id =
-  match resolve_and_get_delivery_rtt t msg_id with
-  | Ok rtt ->
-      let cbs = get_cbs_exn t in
-      cbs.on_rx_ack msg_id rtt
+  let rcvd_at = Unix.gettimeofday () in
+  match resolve_and_get_sent_at t msg_id with
+  | Ok sent_at ->
+      let rtt = rcvd_at -. sent_at in
+      let { on_rx; _ } = get_cbs_exn t in
+      Ack_received { id = msg_id; rtt; rcvd_at } |> on_rx
   | Error e ->
-      let msg = error_to_string e in
-      Lwt_io.eprint ("[WARNING]: " ^ msg ^ ". Ignoring this...")
+      let msg = Format.asprintf "%a" pp_error e in
+      Lwt_io.eprintf "[WARNING]: %s. Ignoring this...\n" msg
 
 let on_rcv_msg t id payload =
-  let { on_rx_msg; _ } = get_cbs_exn t in
-  let%lwt () = on_rx_msg payload in
+  let rcvd_at = Unix.gettimeofday () in
+  let { on_rx; _ } = get_cbs_exn t in
+  let%lwt () = Msg_received { id; content = payload; rcvd_at } |> on_rx in
   send_ack t id
 
 let rx_loop ({ frame_reader; oc; _ } as t) =
@@ -171,10 +196,11 @@ let rx_loop ({ frame_reader; oc; _ } as t) =
         Lwt_io.write_line oc line
     (* TODO: [ERR] If this propagates up, it should be modded by session in some way *)
     | Error (Protocol_error frame_err) ->
-        let err_msg =
-          "Frame error @ [ Frame_reader ]: " ^ F.error_to_string frame_err
+        let e_msg = Format.asprintf "%a" F.pp_error frame_err in
+        let%lwt () =
+          Lwt_io.eprintf "Frame error @ [ Frame_reader ]: %s\n" e_msg
         in
-        Lwt_io.eprintf "%s\n" err_msg >>= fun () -> Lwt.fail (Failure err_msg)
+        Lwt.fail (Failure e_msg)
   in
   loop ()
 

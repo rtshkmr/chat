@@ -11,14 +11,7 @@ let test_ignores_spurious_acks =
       let { rd = net_ic; wr = net_oc; _ } = make_pipe_with_switch switch in
       (* let cap = capture_output switch in *)
       let no_op_cb = fun _ -> Lwt.return_unit in
-      let callbacks =
-        Some
-          {
-            S.on_rx_msg = no_op_cb;
-            on_rx_ack = (fun _ _ -> Lwt.return_unit);
-            on_rx_close = no_op_cb;
-          }
-      in
+      let callbacks = Some { S.on_rx = no_op_cb } in
       let session =
         S.create ~ic:net_ic ~oc:Lwt_io.null ~callbacks
           ~on_fini:(fun () -> Lwt.return_unit)

@@ -123,7 +123,7 @@ let legal_payloads =
     (* Edge cases *)
     {
       desc = "Max payload (1MB)";
-      bytes = Bytes.make Frame.max_payload_sz 'x';
+      bytes = Bytes.make Frame.max_payload_size 'x';
       err = None;
     };
     {
@@ -139,10 +139,10 @@ let illegal_serialised_frames =
       desc = "Payload too big (>1MB)";
       bytes =
         Test_helpers.make_raw_frame_bs 0 1l
-          (Bytes.make (1 + Frame.max_payload_sz) 'x');
+          (Bytes.make (1 + Frame.max_payload_size) 'x');
       err =
         Frame.Payload_too_big
-          { sz = 1 + Frame.max_payload_sz; max = Frame.max_payload_sz };
+          { sz = 1 + Frame.max_payload_size; max = Frame.max_payload_size };
     };
     {
       desc = "Payload too small";

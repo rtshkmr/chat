@@ -1,26 +1,28 @@
-type t = { ic : Lwt_io.input_channel }
-type error = Connection_lost of string | Protocol_error of Frame.error
+module F = Frame
 
-let error_to_string = function
-  | Connection_lost s -> Printf.sprintf "Connection lost: %s" s
+type t = { ic : Lwt_io.input_channel }
+type error = Connection_lost of string | Protocol_error of F.error
+
+let pp_error fmt = function
+  | Connection_lost s -> Format.fprintf fmt "Connection lost: %s" s
   | Protocol_error frame_e ->
-      let reason = Frame.error_to_string frame_e in
-      Printf.sprintf "Protocol Error @ [Frame_reader]: %s" reason
+      Format.fprintf fmt "Protocol Error @ [Frame_reader]: %a" F.pp_error
+        frame_e
 
 let create ic = { ic }
 
-let read_frame t =
-  let header_len = Frame.frame_header_sz in
+let read_frame { ic } =
+  let header_len = F.hdr_size in
   try%lwt
     let header_buf = Bytes.create header_len in
-    let%lwt () = Lwt_io.read_into_exactly t.ic header_buf 0 header_len in
-    match Frame.parse_and_validate_header_bytes header_buf with
+    let%lwt () = Lwt_io.read_into_exactly ic header_buf 0 header_len in
+    match F.parse_and_validate_header_bytes header_buf with
     | Error e -> Lwt.return (Error (Protocol_error e))
     | Ok { typ; id; payload_sz } ->
         let payload_buf = Bytes.create payload_sz in
-        let%lwt () = Lwt_io.read_into_exactly t.ic payload_buf 0 payload_sz in
+        let%lwt () = Lwt_io.read_into_exactly ic payload_buf 0 payload_sz in
         let make_frame_res =
-          Frame.make_frame id payload_buf typ
+          F.make_frame id payload_buf typ
           |> Result.map_error (fun e -> Protocol_error e)
         in
         Lwt.return make_frame_res
@@ -30,7 +32,4 @@ let read_frame t =
       Lwt.return (Error (Connection_lost "peer disconnected, connection reset"))
   | e -> Lwt.return (Error (Connection_lost (Printexc.to_string e)))
 [@@warning "-4"]
-(* This pattern-matching is fragile but it doesn't matter for us, we only handle
-   one case here that we know of, else it's just a protocol error that will
-   propagate to the caller as well and the session will just kill itself.
-  It will remain exhaustive when constructors are added to type Unix.error*)
+(* Fragile pattern-matching on Unix.error here is fine, we care about a subset of errors and how to handle them. If there's a need to lift new errors from the catch-all case to specialised handling then they will be done with test-additions *)

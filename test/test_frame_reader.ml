@@ -55,8 +55,8 @@ let make_streaming_tc ({ name; frames; intent } : In.freader_streaming_input) =
       in
 
       if List.length rcvd_frames <> List.length frames then
-        Alcotest.failf "%s: expected %d frames, got %d" intent
-          (List.length frames) (List.length rcvd_frames);
+        failf "%s: expected %d frames, got %d" intent (List.length frames)
+          (List.length rcvd_frames);
 
       check (list frame_testable) intent frames rcvd_frames;
       Lwt.return_unit)
@@ -75,8 +75,7 @@ let make_edge_case_tc
       let%lwt result = FR.read_frame reader in
       match result with
       | Ok rcvd_frame -> check_frame rcvd_frame
-      | Error e ->
-          Alcotest.failf "Expected frame, got error: %s" (FR.error_to_string e))
+      | Error e -> failf "Expected frame, got error: %a" FR.pp_error e)
 
 let edge_case_test_inputs : In.freader_edge_case_input list =
   [
@@ -89,7 +88,7 @@ let edge_case_test_inputs : In.freader_edge_case_input list =
           | F.Ack { id } ->
               check int32 "ack id matches" 12l id;
               Lwt.return_unit
-          | _ -> Alcotest.fail "Expected Ack");
+          | _ -> fail "Expected Ack");
     };
     {
       name = "Close frame (zero payload)";
@@ -98,7 +97,7 @@ let edge_case_test_inputs : In.freader_edge_case_input list =
         (fun result ->
           match result with
           | F.Close -> Lwt.return_unit
-          | _ -> Alcotest.fail "Expected Close");
+          | _ -> fail "Expected Close");
     };
     {
       name = "Msg frame with empty payload";
@@ -109,7 +108,7 @@ let edge_case_test_inputs : In.freader_edge_case_input list =
           | F.Msg { payload; _ } ->
               check int "empty payload" 0 (Bytes.length payload);
               Lwt.return_unit
-          | _ -> Alcotest.fail "Expected Msg with empty payload");
+          | _ -> fail "Expected Msg with empty payload");
     };
   ]
 [@@warning "-4"]
@@ -133,8 +132,7 @@ let make_connection_loss_tc
       let%lwt result = FR.read_frame reader in
       match result with
       | Ok _ ->
-          Alcotest.fail
-            (Printf.sprintf "Expected error, got Ok. Test intent: %s" name)
+          fail (Printf.sprintf "Expected error, got Ok. Test intent: %s" name)
       | Error e -> check_error e)
 
 let connection_loss_test_inputs : In.freader_conn_loss_input list =
@@ -149,9 +147,7 @@ let connection_loss_test_inputs : In.freader_conn_loss_input list =
               let intent = "error reason indicates peer closed" in
               check string intent "peer closed" msg;
               Lwt.return_unit
-          | _ ->
-              Alcotest.failf "Expected Connection_lost, got %s"
-                (FR.error_to_string error));
+          | _ -> failf "Expected Connection_lost, got %a" FR.pp_error error);
     };
     {
       name = "EOF after 5 of 9 header bytes (partial tx) → Connection_lost";
@@ -166,14 +162,14 @@ let connection_loss_test_inputs : In.freader_conn_loss_input list =
         (fun error ->
           match error with
           | FR.Connection_lost _ -> Lwt.return_unit
-          | _ -> Alcotest.fail "Expected Connection_lost mid-header");
+          | _ -> fail "Expected Connection_lost mid-header");
     };
     {
       name = "EOF after header but before claimed payload → Connection_lost";
       init =
         (fun oc ->
           let header = make_raw_frame_bs 0 1l (Bytes.make 100 'x') in
-          let header_only = Bytes.sub header 0 F.frame_header_sz in
+          let header_only = Bytes.sub header 0 F.hdr_size in
           let partial_payload = Bytes.make 50 'x' in
           let%lwt () = write_raw oc header_only in
           write_raw oc partial_payload);
@@ -181,7 +177,7 @@ let connection_loss_test_inputs : In.freader_conn_loss_input list =
         (fun error ->
           match error with
           | FR.Connection_lost _ -> Lwt.return_unit
-          | _ -> Alcotest.fail "Expected Connection_lost mid-payload");
+          | _ -> fail "Expected Connection_lost mid-payload");
     };
   ]
 [@@warning "-4"]
@@ -199,10 +195,10 @@ let make_protocol_error_tc
 
       let%lwt result = FR.read_frame reader in
       match result with
-      | Ok _ -> Alcotest.fail "Expected protocol error, got Ok"
+      | Ok _ -> fail "Expected protocol error, got Ok"
       | Error (FR.Protocol_error _e as rcvd_err) -> expect_error rcvd_err
       | Error (FR.Connection_lost msg) ->
-          Alcotest.failf "Expected Protocol_error, got Connection_lost: %s" msg)
+          failf "Expected Protocol_error, got Connection_lost: %s" msg)
 
 let protocol_error_test_inputs : In.freader_protocol_input list =
   [
@@ -213,25 +209,21 @@ let protocol_error_test_inputs : In.freader_protocol_input list =
         (fun error ->
           match error with
           | FR.Protocol_error (F.Unknown_frame_type 0xFF) -> Lwt.return_unit
-          | _ ->
-              Alcotest.failf "Expected Unknown_frame_type, got %s"
-                (FR.error_to_string error));
+          | _ -> failf "Expected Unknown_frame_type, got %a" FR.pp_error error);
     };
     {
       name = "Payload too big (claims max + 1B)";
       frame_bytes =
         (let full_frame =
-           make_raw_frame_bs 0 1l (Bytes.make (1 + F.max_payload_sz) 'x')
+           make_raw_frame_bs 0 1l (Bytes.make (1 + F.max_payload_size) 'x')
          in
          (* Only write the header, not the 1MB+ payload *)
-         Bytes.sub full_frame 0 F.frame_header_sz);
+         Bytes.sub full_frame 0 F.hdr_size);
       expect_error =
         (fun error ->
           match error with
           | FR.Protocol_error (F.Payload_too_big _) -> Lwt.return_unit
-          | _ ->
-              Alcotest.failf "Expected Payload_too_big, got %s"
-                (FR.error_to_string error));
+          | _ -> failf "Expected Payload_too_big, got %a" FR.pp_error error);
     };
   ]
 [@@warning "-4"]

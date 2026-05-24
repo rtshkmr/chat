@@ -101,28 +101,8 @@ let ack id = F.Ack { id }
 let close_frame = F.Close
 
 let frame_testable =
-  let pp fmt f =
-    match f with
-    | F.Msg { id; payload } ->
-        Format.fprintf fmt "Msg{id=%ld, payload=%d bytes}" id
-          (Bytes.length payload)
-    | F.Ack { id } -> Format.fprintf fmt "Ack{id=%ld}" id
-    | F.Close -> Format.fprintf fmt "Close"
-  in
   let is_equal a b = F.to_bytes a = F.to_bytes b in
-  Alcotest.testable pp is_equal
+  Alcotest.testable F.pp is_equal
 
-let frame_error_testable =
-  let pp fmt e = Format.fprintf fmt "%s" (F.error_to_string e) in
-  Alcotest.testable pp ( = )
-
-let frame_reader_error_testable =
-  let pp fmt e = Format.fprintf fmt "%s" (FR.error_to_string e) in
-  Alcotest.testable pp ( = )
-
-(** Read exactly one frame from a pipe's read end, fail if error. *)
-let read_one_frame _switch pipe =
-  let reader = FR.create pipe.rd in
-  match%lwt FR.read_frame reader with
-  | Ok f -> Lwt.return f
-  | Error e -> Alcotest.failf "Expected frame, got: %s" (FR.error_to_string e)
+let frame_error_testable = Alcotest.testable F.pp_error ( = )
+let frame_reader_error_testable = Alcotest.testable FR.pp_error ( = )
