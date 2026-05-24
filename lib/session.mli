@@ -5,6 +5,20 @@
     Since a chat-connection is stateful, the session keeps track of [ msg_id ]
     and [ pending_acks ] as well.*)
 
+type exit_reason =
+  | Peer_disconnected  (** Received Close frame: clean, expected termination. *)
+  | Lost_conn of string
+      (** EOF or ECONNRESET: peer vanished without a Close frame. *)
+  | Broken_pipe  (** EPIPE on tx — we tried to write to a dead socket. *)
+  | Protocol_error of Frame.error
+      (** Received a frame that violates our protocol. *)
+  | Unexpected of exn
+      (** Programmer error or unhandled exception — should not happen. *)
+
+exception Session_exit of exit_reason
+
+val pp_exit_reason : Format.formatter -> exit_reason -> unit
+
 type rx_event =
   | Msg_received of { id : Frame.msg_id; content : bytes; rcvd_at : float }
   | Ack_received of { id : Frame.msg_id; rtt : float; rcvd_at : float }
@@ -15,20 +29,10 @@ val pp_display_event : Format.formatter -> rx_event -> unit
 type console_callbacks = { on_rx : rx_event -> unit Lwt.t }
 type t
 
-type error =
-  | Msg_not_pending_ack of int32
-  | Network_error of string
-  | Frame_reader_error of Frame_reader.error
-
-val pp_error : Format.formatter -> error -> unit
-
-exception Rx_callbacks_not_binded of string
-
 val create :
   ic:Lwt_io.input_channel ->
   oc:Lwt_io.output_channel ->
   ?callbacks:console_callbacks option ->
-  ?on_fini:(unit -> unit Lwt.t) ->
   unit ->
   t
 (** Create a session. Does not start I/O until [run] is called. *)

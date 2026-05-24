@@ -1,5 +1,3 @@
-open Lwt.Infix
-
 type network_config = { port : int; host : string; timeout : int }
 
 type terminal_config = {
@@ -23,49 +21,28 @@ let init_client_socket ~host ~port =
       let%lwt () = Lwt_unix.connect socket addr.Unix.ai_addr in
       Lwt.return socket
 
-(** TODO: [FINI] client should close the underlying socket her most likely else
-    there's 2 cleanup sites for the same resource hierarchy — only the channels.
-    But those channels were created with ~close:Lwt.return which means closing
-    them doesn't close the fd. So sock never gets properly closed via on_fini.
-    The fini () in run_client closes sock, so there's a correct cleanup path,
-    but it's only because of Lwt.finalize at the supervisor/harness level *)
-let init_session sock =
-  let ic = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.input sock in
-  let oc = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.output sock in
-  let on_fini () = Lwt_io.close oc >>= fun () -> Lwt_io.close ic in
-  Session.create ~ic ~oc ~on_fini ()
-
 let run_client ~terminal ~net =
   let%lwt sock = init_client_socket ~host:net.host ~port:net.port in
-  (* TODO [POLISH]: add an endpoint struct with connection info about the chat that can be used for the irc-like promp *)
-  let session = init_session sock in
-  let ic, oc = (terminal.ic, terminal.oc) in
-  let console = Console.create ~ic ~oc () |> Console.bind_session ~session in
-  let thunk () = Lwt.pick [ Session.run session; Console.run console ] in
-
-  let fini () =
-    let%lwt () = try%lwt Lwt_unix.close sock with _ -> Lwt.return_unit in
-    try%lwt Lwt_io.write_line oc "[Finalised client]"
-    with _ -> Lwt.return_unit
+  let net_ic = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.input sock in
+  let net_oc = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.output sock in
+  let session = Session.create ~ic:net_ic ~oc:net_oc () in
+  let console =
+    Console.create ~ic:terminal.ic ~oc:terminal.oc ()
+    |> Console.bind_session ~session
   in
-
-  Lwt.finalize thunk fini
-
-(* let fini () = *)
-(*   ( try%lwt Lwt_unix.close sock with _ -> Lwt.return_unit in *)
-(*   try%lwt Lwt_io.write_line oc "[Finalised client]" with _ -> Lwt.return_unit ) in *)
-(* Lwt.finalize thunk fini *)
-
-(* Lwt.catch (fun () -> Lwt_unix.close sock) (fun _ -> Lwt.return_unit) *)
-(* >>= fun () -> *)
-(* Lwt.catch *)
-(*   (fun () -> Lwt_io.write_line oc "[Finalised client]") *)
-(*   (fun _ -> Lwt.return_unit) *)
-(* in *)
-(* let fini () = *)
-(*   Lwt_unix.close sock >>= fun () -> Lwt_io.write_line oc "[Finalised client]" *)
-(* in *)
-(* Lwt.finalize thunk fini *)
+  let thunk () = Lwt.pick [ Session.run session; Console.run console ] in
+  let fini () =
+    let%lwt () = try%lwt Lwt_io.close net_oc with _ -> Lwt.return_unit in
+    let%lwt () = try%lwt Lwt_io.close net_ic with _ -> Lwt.return_unit in
+    try%lwt Lwt_unix.close sock with _ -> Lwt.return_unit
+  in
+  try%lwt Lwt.finalize thunk fini with
+  | Session.Session_exit reason ->
+      let msg = Format.asprintf "[Session: %a]" Session.pp_exit_reason reason in
+      Lwt_io.eprintf "%s\n" msg
+  | Console.Console_exn e ->
+      let msg = Format.asprintf "[Console: %a]" Console.pp_error e in
+      Lwt_io.eprintf "%s\n" msg
 
 let run ?(terminal = make_terminal_config ()) ~(net : network_config) () =
   let%lwt () =
