@@ -16,6 +16,7 @@ type exit_reason =
       (** Programmer error or unhandled exception — should not happen. *)
 
 exception Session_exit of exit_reason
+exception Session_invariant_violated of string
 
 val pp_exit_reason : Format.formatter -> exit_reason -> unit
 
@@ -23,19 +24,23 @@ type rx_event =
   | Msg_received of { id : Frame.msg_id; content : bytes; rcvd_at : float }
   | Ack_received of { id : Frame.msg_id; rtt : float; rcvd_at : float }
   | Peer_closed of { rcvd_at : float }
-
-val pp_display_event : Format.formatter -> rx_event -> unit
+  | Spurious_ack of { id : Frame.msg_id; rcvd_at : float }
 
 type console_callbacks = { on_rx : rx_event -> unit Lwt.t }
 type t
 
+(** NOTE: the ic/oc are being passed in separate from the sock for testability.*)
 val create :
   ic:Lwt_io.input_channel ->
   oc:Lwt_io.output_channel ->
   ?callbacks:console_callbacks option ->
+  (* TODO:[POLISH] rename to conn_sock because it's a better name *)
+  ?conn_sock:Lwt_unix.file_descr option ->
   unit ->
   t
 (** Create a session. Does not start I/O until [run] is called. *)
+
+val meta_of_opt : t -> Session_meta.t option
 
 val set_callbacks : t -> console_callbacks -> t
 (** Hydrates the session by setting the console-specific callbacks that the

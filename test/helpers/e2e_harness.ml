@@ -40,10 +40,8 @@ let spawn_server switch =
   let net : S.network_config =
     { port = assigned_port; bind = "localhost"; timeout = 12 }
   in
-  let terminal =
-    S.make_terminal_config ~ic:term_in_pipe.rd ~oc:term_out.pipe.wr ()
-  in
-  let task = S.run_with_socket ~sock:server_socket ~terminal ~net () in
+  let term = S.make_terminal_conf ~ic:term_in_pipe.rd ~oc:term_out.pipe.wr () in
+  let task = S.run_with_socket ~sock:server_socket ~term ~net () in
   Lwt.return
     ( { terminal_in = term_in_pipe; terminal_out = term_out; task },
       assigned_port )
@@ -53,9 +51,9 @@ let spawn_client switch ~port =
   let term_out = make_output_spy switch in
   let ic = term_in_pipe.rd in
   let oc = term_out.pipe.wr in
-  let terminal = C.make_terminal_config ~ic ~oc () in
+  let term = C.make_terminal_conf ~ic ~oc () in
   let net : C.network_config = { host = "localhost"; port; timeout = 12 } in
-  let task = C.run ~terminal ~net () in
+  let task = C.run ~term ~net () in
   Lwt.return { terminal_in = term_in_pipe; terminal_out = term_out; task }
 
 (** Enforces timing discipline on the test fixture setup, ensures that socket is

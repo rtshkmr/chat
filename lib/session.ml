@@ -1,15 +1,7 @@
-(* TODO: [ERR] capture user errors well -- session needs custom errors *)
 open Lwt.Infix
+module D = Display
 module F = Frame
 module FR = Frame_reader
-
-let pp_timestamp fmt ts =
-  let tm = Unix.localtime ts in
-  let ms = int_of_float ((ts -. floor ts) *. 1000.) in
-  Format.fprintf fmt "%04d-%02d-%02d %02d:%02d:%02d.%03d" (tm.tm_year + 1900)
-    (tm.tm_mon + 1) tm.tm_mday tm.tm_hour tm.tm_min tm.tm_sec ms
-
-let pp_prompt fmt ts = Format.fprintf fmt "[@[%a@]]" pp_timestamp ts
 
 type exit_reason =
   | Peer_disconnected  (** Received Close frame: clean, expected termination. *)
@@ -19,7 +11,9 @@ type exit_reason =
   | Unexpected of exn  (** Programmer error / unhandled exception *)
 
 exception Session_exit of exit_reason
+exception Session_invariant_violated of string
 
+(* TODO:[UI,POLISH] add in prompt *)
 let pp_exit_reason fmt = function
   | Peer_disconnected -> Format.fprintf fmt "peer disconnected cleanly"
   | Lost_conn reason -> Format.fprintf fmt "connection lost: %s" reason
@@ -31,18 +25,7 @@ type rx_event =
   | Msg_received of { id : F.msg_id; content : bytes; rcvd_at : float }
   | Ack_received of { id : Frame.msg_id; rtt : float; rcvd_at : float }
   | Peer_closed of { rcvd_at : float }
-
-let pp_warning fmt reason = Format.fprintf fmt "[WARNING] %s." reason
-
-let pp_display_event fmt = function
-  | Msg_received { id; content; rcvd_at } ->
-      let len = Bytes.length content in
-      Format.fprintf fmt "◉ ➤ %a <rx:#%ld> [%dB]" pp_prompt rcvd_at id len
-  | Ack_received { id; rtt; rcvd_at } ->
-      Format.fprintf fmt "◉ 🗸 %a <ack:#%ld> rtt=%.6fs\n" pp_prompt rcvd_at id
-        rtt
-  | Peer_closed { rcvd_at } ->
-      Format.fprintf fmt "◎ ☣︎ %a <peer> disconnected\n" pp_prompt rcvd_at
+  | Spurious_ack of { id : F.msg_id; rcvd_at : float }
 
 type console_callbacks = { on_rx : rx_event -> unit Lwt.t }
 
@@ -55,27 +38,29 @@ type state = {
 (* TODO[POLISH] consider renaming ic/oc to net_ic/net_oc *)
 type t = {
   oc : Lwt_io.output_channel;
+  meta : Session_meta.t option;
   callbacks : console_callbacks option ref;
   state : state;
   frame_reader : FR.t;
   shutdown_cond : unit Lwt_condition.t;
 }
 
-let init_state () =
-  {
-    msg_id_counter = ref 0l;
-    pending_acks = Hashtbl.create 32;
-    msg_queue = Lwt_mvar.create_empty ();
-  }
-
-let create ~ic ~oc ?(callbacks = None) () =
+let create ~ic ~oc ?(callbacks = None) ?(conn_sock = None) () =
   {
     oc;
+    meta = Option.map (fun sock -> Session_meta.of_sock sock) conn_sock;
     callbacks = ref callbacks;
-    state = init_state ();
+    state =
+      {
+        msg_id_counter = ref 0l;
+        pending_acks = Hashtbl.create 32;
+        msg_queue = Lwt_mvar.create_empty ();
+      };
     frame_reader = FR.create ic;
     shutdown_cond = Lwt_condition.create ();
   }
+
+let meta_of_opt t = t.meta
 
 let set_callbacks t cbs =
   t.callbacks := Some cbs;
@@ -114,11 +99,11 @@ let resolve_and_get_sent_at { state = { pending_acks; _ }; _ } msg_id =
 let get_cbs_exn { callbacks; _ } =
   match !callbacks with
   | None ->
-      let expectation =
-        "Session's rx callbacks must be binded -- did you forget to call \
-         [Console.bind_session]?"
+      let exn =
+        Session_invariant_violated
+          "callbacks not bound: did you forget [Console.bind_session]?"
       in
-      raise (Session_exit (Unexpected (Failure expectation)))
+      raise exn
   | Some cbs -> cbs
 
 (* TODO: [REFACTOR, TEST] <render cb> -- this function is ugly, can avoid materialising and make this faster. Also should likely just be converted to pretty printers *)
@@ -150,11 +135,12 @@ let shutdown t =
   Lwt.return_unit
 
 (* TODO:[POLISH] make this display useful goodbye after chat_meta is up *)
-let fini _t =
-  let now = Unix.gettimeofday () in
-  let msg = Format.asprintf "◎ %a <session> shutting down" pp_prompt now in
-  try%lwt Lwt_io.printl msg with _ -> Lwt.return_unit
+(* let fini _t = *)
+(* let now = Unix.gettimeofday () in *)
+(* let msg = Format.asprintf "◎ %a <session> shutting down" D.pp_prompt now in *)
+(* try%lwt Lwt_io.eprintl msg with _ -> Lwt.return_unit *)
 (* TODO [REFACTOR, TEST]  <render cb> figure out the displayign callback needs *)
+(* TODO: STUB: wrong channel, pass it via callback instead *)
 
 let on_peer_termination t =
   let rcvd_at = Unix.gettimeofday () in
@@ -169,15 +155,9 @@ let on_rcv_ack t msg_id =
       let { on_rx; _ } = get_cbs_exn t in
       Ack_received { id = msg_id; rtt; rcvd_at } |> on_rx
   | Error _ ->
-      let now = Unix.gettimeofday () in
-      let reason =
-        Format.asprintf "⩼ Spurious ack for Msg <%ld> arrived at %a" msg_id
-          pp_timestamp now
-      in
-      let msg = Format.asprintf "%a" pp_warning reason in
-      (* TODO [CHAT_META] awaiting on chat meta implementation to display cool things *)
-      (* Lwt_io.write_line t.oc msg *)
-      Lwt_io.printl msg
+      let rcvd_at = Unix.gettimeofday () in
+      let { on_rx; _ } = get_cbs_exn t in
+      Spurious_ack { id = msg_id; rcvd_at } |> on_rx
 
 let on_rcv_msg t id payload =
   let rcvd_at = Unix.gettimeofday () in
@@ -187,7 +167,7 @@ let on_rcv_msg t id payload =
 
 let pp_session_exit_reason fmt reason =
   let now = Unix.gettimeofday () in
-  Format.fprintf fmt "%a %a" pp_prompt now pp_exit_reason reason
+  Format.fprintf fmt "%a %a" D.pp_prompt now pp_exit_reason reason
 
 let rx_loop ({ frame_reader; _ } as t) =
   let break_with reason =
@@ -226,16 +206,16 @@ let handle_network_io t =
   in
   try%lwt Lwt.pick [ rx_loop t; tx_loop t; await_shutdown_signal t ] with
   | Lwt.Canceled -> Lwt.return_unit (* silent, cancelled by harness *)
-  | Session_exit _ as e -> Lwt.fail e (* pass through case  *)
+  | (Session_exit _ | Session_invariant_violated _) as e -> Lwt.fail e
   | Unix.Unix_error (Unix.ECONNRESET, _, _) -> exit_with (Lost_conn "reset")
   | Unix.Unix_error (Unix.EPIPE, _, _) -> exit_with Broken_pipe
   | e -> exit_with (Unexpected e)
 [@@warning "-4"]
 (* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)
 
-let run t =
-  (* TODO[POLISH] after creating chat_meta, use that info to make this meaningful *)
-  (* let%lwt () = Lwt_io.write_line t.oc "Running session..." in *)
-  let handle_network_thunk () = handle_network_io t in
-  let fini_thunk () = fini t in
-  Lwt.finalize handle_network_thunk fini_thunk
+let run t = handle_network_io t
+(* TODO[CHAT-META,POLISH] after creating chat_meta, use that info to make this meaningful *)
+(* let%lwt () = Lwt_io.write_line t.oc "Running session..." in *)
+(* let handle_network_thunk () = handle_network_io t in *)
+(* let fini_thunk () = fini t in *)
+(* Lwt.finalize handle_network_thunk fini_thunk *)

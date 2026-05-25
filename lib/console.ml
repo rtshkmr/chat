@@ -1,4 +1,7 @@
 open Lwt.Infix
+module D = Display
+module S = Session
+module SMeta = Session_meta
 
 type error =
   | Terminated
@@ -18,16 +21,8 @@ let pp_error fmt = function
       Format.fprintf fmt "I/O error: %s on %s(%s)" (Unix.error_message e) op arg
   | Unexpected e -> Format.fprintf fmt "unexpected: %s" (Printexc.to_string e)
 
-let pp_timestamp fmt ts =
-  let tm = Unix.localtime ts in
-  let ms = int_of_float ((ts -. floor ts) *. 1000.) in
-  Format.fprintf fmt "%04d-%02d-%02d %02d:%02d:%02d.%03d" (tm.tm_year + 1900)
-    (tm.tm_mon + 1) tm.tm_mday tm.tm_hour tm.tm_min tm.tm_sec ms
-
-let pp_prompt fmt ts = Format.fprintf fmt "[@[%a@]]" pp_timestamp ts
-
 let pp_console_error fmt err =
-  Format.fprintf fmt "%a %a" pp_prompt (Unix.gettimeofday ()) pp_error err
+  Format.fprintf fmt "%a %a" D.pp_prompt_now () pp_error err
 
 type user_event =
   | Send_msg of bytes
@@ -38,7 +33,7 @@ type user_event =
 type t = {
   ic : Lwt_io.input_channel;
   oc : Lwt_io.output_channel;
-  mutable session : Session.t option;
+  mutable session : S.t option;
 }
 
 let show_help t = Lwt_io.write_line t.oc "Commands: /quit, /help"
@@ -54,35 +49,58 @@ let maybe_shutdown_session t =
   match t.session with
   | None ->
       Lwt_io.write_line t.oc "You're currently not in any chat, nothing to quit"
-  | Some sess -> Session.shutdown sess
+  | Some sess -> S.shutdown sess
 
 let create ?(ic = Lwt_io.stdin) ?(oc = Lwt_io.stdout) () =
   { session = None; ic; oc }
 
-let make_console_callbacks { oc; _ } =
-  let on_rx = function
-    | (Session.Peer_closed _ | Session.Ack_received _) as ev ->
-        let msg = Format.asprintf "%a" Session.pp_display_event ev in
-        Lwt_io.write_line oc msg
-    | Session.Msg_received rx as ev ->
-        let msg = Format.asprintf "%a" Session.pp_display_event ev in
-        let%lwt () = Lwt_io.write_line oc msg in
-        let len = Bytes.length rx.content in
-        let%lwt () = Lwt_io.write_from_exactly oc rx.content 0 len in
-        Lwt_io.write_line oc "\n"
+let pp_rx_event (meta : SMeta.t) fmt = function
+  | S.Msg_received { id; content = _; rcvd_at } ->
+      Format.fprintf fmt "◉ %a <%a> <rx:#%ld>" D.pp_prompt rcvd_at D.pp_peer
+        meta.them id
+  | Session.Ack_received { id; rtt; rcvd_at } ->
+      Format.fprintf fmt "◉ %a 🗸 <ack:#%ld> rtt=%.6fs" D.pp_prompt rcvd_at id
+        rtt
+  | Session.Peer_closed { rcvd_at } ->
+      Format.fprintf fmt "◎ %a <%a> disconnected" D.pp_prompt rcvd_at D.pp_peer
+        meta.them
+  | Session.Spurious_ack { id; rcvd_at } ->
+      Format.fprintf fmt "⩼ %a spurious ack for <msg:#%ld>" D.pp_prompt rcvd_at
+        id
+
+(* TODO: add in a notify string callback *)
+let make_console_callbacks t session =
+  let on_rx ev =
+    let header =
+      match S.meta_of_opt session with
+      | None -> Format.asprintf "%a" D.pp_test_dummy_header ()
+      | Some meta -> Format.asprintf "%a" (pp_rx_event meta) ev
+    in
+    match ev with
+    | S.Msg_received { content; _ } ->
+        let len = Bytes.length content in
+        let%lwt () = Lwt_io.write_line t.oc header in
+        let%lwt () = Lwt_io.write_line t.oc (Printf.sprintf "[%dB]:" len) in
+        let%lwt () = Lwt_io.write_from_exactly t.oc content 0 len in
+        Lwt_io.write_line t.oc ""
+    | S.Spurious_ack _ | S.Ack_received _ | S.Peer_closed _ ->
+        Lwt_io.write_line t.oc header
   in
-  { Session.on_rx }
+  { S.on_rx }
 
 let bind_session t ~session =
-  let s = t |> make_console_callbacks |> Session.set_callbacks session in
+  let s = make_console_callbacks t session |> Session.set_callbacks session in
   t.session <- Some s;
-  t
+  let display () =
+    match S.meta_of_opt s with
+    | None -> Lwt.return_unit
+    | Some m -> D.write_pp t.oc D.pp_banner m
+  in
+  Lwt.async display
 
 let unbind_session t =
-  (* TODO: [PERF] verify if this cleanup is needed, not sure if will have dangling ptrs *)
   let _ = Option.map Session.unset_callbacks t.session in
-  t.session <- None;
-  t
+  t.session <- None
 
 let parse_user_input line =
   let l = String.trim line in
@@ -96,13 +114,13 @@ let parse_user_input line =
 let maybe_send_msg t bs =
   match t.session with
   | None ->
-      (* TODO: this is where the server announcement type cb will be useful *)
+      (* TODO: [PP] this is where the server announcement type cb will be useful *)
       let msg =
         "[You're not in an active session. Wait for a client to connect before \
          sending messages...]"
       in
       Lwt_io.write_line t.oc msg
-  | Some s -> Session.send_message s bs
+  | Some s -> S.send_message s bs
 
 let run_console t =
   let break_with error =

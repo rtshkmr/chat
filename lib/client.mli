@@ -6,11 +6,11 @@ type terminal_config = {
   log_level : Logs.level;
 }
 
-val make_terminal_config :
+val make_terminal_conf :
   ?ic:Lwt_io.input_channel ->
   ?oc:Lwt_io.output_channel ->
   ?log_level:Logs.level ->
   unit ->
   terminal_config
 
-val run : ?terminal:terminal_config -> net:network_config -> unit -> unit Lwt.t
+val run : ?term:terminal_config -> net:network_config -> unit -> unit Lwt.t
