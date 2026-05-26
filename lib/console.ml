@@ -86,12 +86,11 @@ let pp_rx_event (meta : SMeta.t) fmt = function
       Format.fprintf fmt "⩼ %a spurious ack for <msg:#%ld>" D.pp_prompt rcvd_at
         id
 
-(* TODO: add in a notify string callback *)
 let make_console_callbacks t session =
   let on_rx ev =
     let header =
       match S.meta_of_opt session with
-      | None -> Format.asprintf "%a" D.pp_test_dummy_header ()
+      | None -> Format.asprintf "%a" D.pp_dummy_header ()
       | Some meta -> Format.asprintf "%a" (pp_rx_event meta) ev
     in
     match ev with
@@ -132,7 +131,6 @@ let parse_user_input line =
 let maybe_send_msg t bs =
   match t.session with
   | None ->
-      (* TODO: [PP] this is where the server announcement type cb will be useful *)
       let msg =
         "[You're not in an active session. Wait for a client to connect before \
          sending messages...]"
@@ -156,26 +154,10 @@ let run_console t =
     | None | Some (Slash_cmd _) -> loop ()
   in
   try%lwt loop () with
-  | End_of_file -> break_with Terminated
-  | Lwt.Canceled -> Lwt.return_unit (* silent, cancellation by harness *)
+  | End_of_file | Lwt.Canceled -> Lwt.return_unit
   | Lwt_io.Channel_closed reason -> break_with (Channel_closed reason)
   | Unix.Unix_error (e, op, arg) -> break_with (Io_error (e, op, arg))
   | e -> break_with (Unexpected e)
-
-(* TODO [REFACTOR] : install signint at cli (top-level) *)
-(* let await_sigint { oc; _ } = *)
-(*   let c = Lwt_condition.create () in *)
-
-(*   let _handler = *)
-(*     let broadcast_sigint _ = *)
-(*       Lwt.async (fun () -> *)
-(*           Lwt_io.write_line oc "\nReceived <C-c>, time to call it quits"); *)
-(*       Lwt_condition.broadcast c () *)
-(*     in *)
-(*     Lwt_unix.on_signal Sys.sigint broadcast_sigint *)
-(*   in *)
-(*   Lwt_condition.wait c *)
-(* [@@warning "-32"] *)
 
 let run t =
   let%lwt () = show_help t in

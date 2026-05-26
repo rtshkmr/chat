@@ -67,10 +67,11 @@ let run_client ~term ~net =
   Console.bind_session console ~session;
   let thunk () = Lwt.pick [ Session.run session; Console.run console ] in
   let fini () =
-    let%lwt () = try%lwt Lwt_io.close net_oc with _ -> Lwt.return_unit in
-    let%lwt () = try%lwt Lwt_io.close net_ic with _ -> Lwt.return_unit in
-    let%lwt () = D.write_pp term.oc pp_event Disconnected in
-    try%lwt Lwt_unix.close sock with _ -> Lwt.return_unit
+    let safe f = try%lwt f () with _ -> Lwt.return_unit in
+    let%lwt () = safe (fun () -> Lwt_io.close net_oc) in
+    let%lwt () = safe (fun () -> Lwt_io.close net_ic) in
+    let%lwt () = safe (fun () -> D.write_pp term.oc pp_event Disconnected) in
+    safe (fun () -> Lwt_unix.close sock)
   in
   try%lwt Lwt.finalize thunk fini with
   | Session.Session_exit reason ->

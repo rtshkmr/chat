@@ -17,6 +17,7 @@ type error =
   | Payload_too_short
   | Unknown_frame_type of int
   | Payload_too_big of { sz : int; max : int }
+  | Invalid_payload_sz of { sz : int; max : int }
 
 let pp fmt = function
   | Msg { id; payload } ->
@@ -31,6 +32,10 @@ let pp_error fmt = function
   | Unknown_frame_type tag -> Format.fprintf fmt "Unknown frame type: %d" tag
   | Payload_too_big { sz; max } ->
       Format.fprintf fmt "Payload too big (%dB). Max %dB allowed." sz max
+  | Invalid_payload_sz { sz; max } ->
+      Format.fprintf fmt
+        "Invalid payload size (%dB), it should be between 0 and %dB inclusive."
+        sz max
 
 let type_of = function Msg _ -> 0 | Ack _ -> 1 | Close -> 2
 
@@ -54,7 +59,7 @@ let header_meta_of t =
 
 let validate_payload_sz payload_sz =
   if payload_sz < 0 then
-    Error (Payload_too_big { sz = payload_sz; max = max_payload_size })
+    Error (Invalid_payload_sz { sz = payload_sz; max = max_payload_size })
   else if payload_sz > max_payload_size then
     Error (Payload_too_big { sz = payload_sz; max = max_payload_size })
   else Ok ()

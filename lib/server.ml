@@ -120,6 +120,5 @@ let run ?(term = make_terminal_conf ()) ~(net : network_config) () =
   | Unix.Unix_error (Unix.EACCES, _, _) -> exit_with (Perms_denied net.port)
   | Server_error e -> exit_with e
   | e -> exit_with (Unexpected e)
-[@@warning "-27-4"]
+[@@warning "-4"]
 (* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)
-(*-- TODO: [STUB] wire up log levels and conn timeout *)

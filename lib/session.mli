@@ -6,7 +6,6 @@
     and [ pending_acks ] as well.*)
 
 type exit_reason =
-  | Peer_disconnected  (** Received Close frame: clean, expected termination. *)
   | Lost_conn of string
       (** EOF or ECONNRESET: peer vanished without a Close frame. *)
   | Broken_pipe  (** EPIPE on tx — we tried to write to a dead socket. *)
@@ -16,7 +15,10 @@ type exit_reason =
       (** Programmer error or unhandled exception — should not happen. *)
 
 exception Session_exit of exit_reason
+
 exception Session_invariant_violated of string
+(** For accidental invariant violations ( from programmer error ) that should
+    fail loudly.*)
 
 val pp_exit_reason : Format.formatter -> exit_reason -> unit
 
@@ -34,7 +36,6 @@ val create :
   ic:Lwt_io.input_channel ->
   oc:Lwt_io.output_channel ->
   ?callbacks:console_callbacks option ->
-  (* TODO:[POLISH] rename to conn_sock because it's a better name *)
   ?conn_sock:Lwt_unix.file_descr option ->
   unit ->
   t

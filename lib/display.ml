@@ -18,5 +18,5 @@ let pp_banner fmt { SMeta.me; them; connected_at } =
   Format.fprintf fmt "◉ %a <chat> %a → %a\n" pp_prompt connected_at pp_peer me
     pp_peer them
 
-let pp_test_dummy_header fmt () =
+let pp_dummy_header fmt () =
   Format.fprintf fmt "◉ %a <chat> [dummy test] local → remote" pp_prompt_now ()

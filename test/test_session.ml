@@ -73,7 +73,7 @@ let test_lost_conn_on_eof =
           | S.Session_exit (S.Lost_conn _) -> Lwt.return_unit
           | S.Session_exit other ->
               Alcotest.failf "wrong exit_reason: %a" S.pp_exit_reason other))
-[@@warning "-4-21"]
+[@@warning "-4"]
 
 let test_protocol_error_on_bad_frame =
   ALWT.test_case "Unknown frame type raises Protocol_error" `Quick
@@ -146,7 +146,9 @@ let test_ack_received_fires_callback =
       let session, client_oc =
         make_session switch ~callbacks:(Some { S.on_rx }) ()
       in
-      (* sends first msg to await a pending ack (will be first msg id=1l); gets picked up from mvar by tx-loop *)
+      (* NOTE: sends first msg to await a pending ack (will be first msg id=1l);
+         gets picked up from mvar by tx-loop. This is cuz of the scheduler being
+         cooperative and the mvar being empty. *)
       let _send_task = S.send_message session (Bytes.of_string "💥") in
       let%lwt () = ack 1l |> write_frame client_oc in
       let%lwt () = close_frame |> write_frame client_oc in

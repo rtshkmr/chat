@@ -19,5 +19,7 @@ val run_with_socket :
   net:network_config ->
   unit ->
   unit Lwt.t
+(** [run_with_socket] allows the caller to inject the socket [sock], expected to
+    be useful when writing tests.*)
 
 val run : ?term:terminal_config -> net:network_config -> unit -> unit Lwt.t

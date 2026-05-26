@@ -11,436 +11,306 @@ This org-file aims to document progress formatively in 3 areas:
    - unique problems / bugs faced as a side-effect of implementation decisions
 3. Future Extension Considerations
    - available evolution paths for the current code
+
+     Testing was a whole separate saga --- over @ [[./testing_notes.org][testing_notes.org]]
    -----
 
 * Design Decisions
-** multi-thread (loop routines) need sound coordination
-Both the server and client have a routine that eventually needs to do a bunch of independent tasks without the tasks blocking each other.
-
-For example,  the server starts by entering an =accept_loop=, given a live socket. This loop has a handler thunk which is responsible for handling clients concurrently (=handle_client_conc=). This is where we see the 3 independent tasks, which are 3 loops of their own:
- 1. =read_stdin_loop=: reads user input
- 2. =read_socket_loop=: reads from network
- 3. =write_socket_loop=: writes to network
-
-The loops have a ordering/logical dependency between them, that's why there's a need to handle the coordination between these threads --- which is why we need to be reliant on some *shared state*.
-
-=Lwt= is cooperative, so no preemption worries to care about -- only need to think about coordination at the queue boundary.
-
-
-*** Option A: using a =Lwt_mvar=
-It's the simplest example, it's a single [[https://ocaml.github.io/odoc/lwt/lwt/Lwt_mvar/index.html][mailbox variable]]  that we can use for sync b/w the threads and in this commit it's essentially a "Message" -- whatever that came from the TCP socket.
-
-Single-slot means =read_stdin_loop= blocks on =put= until =write_socket_loop=
-calls =take=.
 
-- Possible Issues:
-  * Single-slot coupling between stdin and socket writes
-  * If user types fast while network is slow, =put= blocks and typing freezes
-  * Won't work for queuing multiple messages ahead of time
-- Possible benefits:
-  - Idiomatic Lwt
-  - Creates natural backpressure: if network is slow, typing feels slow too (arguably good UX)
-  - Good enough for human typing speed
-
-*** Option B: using a =Lwt_stream=
-Stream semantics, likely lazy operations as well. Non-blocking =push=. Decouples =stdin= from socket I/O completely.
-
-- Possible Issues:
-  * no explicit buffering, the stream would be unbounded
-  * Internal buffering is implicit, harder to debug  -- not sure if it's bounded or unbounded queue, seems like it's lazy ops
-  * can't add backpressure later to effect on UX later
-
-- Possible benefits:
-  - Push never blocks
-  - Can handle bursts of messages
-  - Scales to multiple producers/consumers later for extensions
-
-*** Option C: Explicit Buffering  using a Bounded Queue
-This involves us using a queue, but queues are not threadsafe so there's a need to handroll the sync for it.
-
-- Possible Issues:
-  * Needs explicit sync mechanisms --- complex code
-  * might be more error-prone
-  * probably no need for 1:1 chat app
-
-- Possible benefits:
-  - We will have control over the capacity of the queue
-  - Can tune the backpressure manually
-
-- unknowns:
-  - are there Atomic queues or atomic vars that we can use together with Lwt? would be nice to have an atomic queue for the messages then we'd not need explicit sync via conditions or mutex
-
-*** Option D: Using an Unbounded Queue
-This is like the queue before but without a max capacity. Like a limitless buffer.
-
-- Possible Issues:
-  * unbounded memory feels like a possible source of memory leaks if rate of producing to the buffer more than rate of consuming from the buffer
-
-- Possible benefits:
-  - simple, putting into the queue will never block
-  - stdin and socket writes are completely independent
-*** Current Decision
-For this POC, option A is good enough, but I might consider a bufferred queue because bufferred mechanics feel right in such a case of inter-thread coordination.
-** TODO [DOC] Different Ways to Define Frames
-*** the relevance of network byte order
-** TODO [DOC] Session as coordinator of all network IO
-** TODO [DOC] Decoupling user IO (Console) and network IO (Session)
-*** Lifecycle Scope:
-Console must live at the *application* scope (server or client), not at the *session* scope.
-If =Console.run= is inside per-session handlers, it:
-    1. Restarts per session (wasteful), can't reuse sockets ...
-    2. Closes =stdin= / =stdout= on first =EOF= (breaks subsequent sessions)
-    3. Blocks =accept_loop= from awaiting new clients (with =Lwt.join=)
-
-So, the solution is to move =Console.run= to application scope, supervise it with =Lwt.pick= $\implies$ *Sessions are ephemeral within the console's lifetime.* $\leftarrow$ for server
-*** ownership of the stdin read loop
-*** decoupling rationale
-temp note:
-#+begin_quote
-I see the merits of NOT creating an App module yet and wiring that up. At the same time, I do think that user interactions currently deserves its own module because:
-
-   i) yes it's 2 loops, an io pair but it's also:
-
-   ii) implementing logic for capturing user events --- via slash commands (e.g. `/quit`)  and via keypresses. These listeners are unique in the sense that other areas of the codebase doesn't have such listeners. Firstly, I don't know yet what's a good pattern to have two loops running and to attach multiple listeners to the input loop yet. This also makes it clear that only this user interaction specific module will use the frame-codec also, so it's going to be in charge of the codec edge cases as well. Therefore, I see this as substantial logic. I'm not sure about the naming of this module yet, maybe `User_interaction.ml` or something better might work here. It shall also employ the callback patterns like the session module and everything is still decoupled well
-
-  iii) I'm not really worried about code duplication, the problem is more that I don't want to make a module messy (in this case server / client) by adding in substantial amounts of code that overloads its responsibilities. In this case there's a clear responsibiilty boundary for user interactions.
-#+end_quote
-*** ownership of slash-command parsing
-*** lifecycle dependency console (@ app-level) vs session (@ connection-level) $\implies$ binding-pattern
-- the callback registrations that the two may "share" happens via a =bind= function
-  - module skeleton vs hydration point is separated
-
-          hydration point referring to the callback bindings
-
-  - the hydration point is a singular, concentrated area where stateful actions happen (a single wiring point) -- cleaner mutation boundary
-
-  - whether currently in a session or not is now implicit
-
-- the chicken and egg situation is a consequence of the framing that console MAY outlive session --- not a need for v0 but it keeps the lifecycle decisions clean without adding complexity and allowing clean evolution paths into an app where a user may use slash commands to reconnect / connect to different server...
-
-- so it's natural to end up with a 2-phased init for this
-*** channel creator should be responsible for it's fini logic also and how that plays into DI and RAII intuitions
-** TODO [DOC] Supervision and future Supervision Strats
-** TODO [DOC] NOT using a TUI, line-based buffering @ Console
-UI Layer (Future): Single-line input via readline in v0.
-
-Multi-line and advanced terminal features (message history rendering, status bar) can be implemented via a Notty-based UI module as a drop-in replacement.
------
-** Finalisation Ownership Pattern:  RAII-style "Finalisation belongs to the module that owns the resource"
-
-Pattern discovered: "RAII intuition makes sense her Finalisation belongs to the module that owns the resource."
-
-The intuition goes back to [[https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization][RAII idiom]] which ties the lifetime of a resource directly to the lifetime of its owner: when an object goes out of scope, its destructor automatically releases any resources it owns (memory, file descriptors, locks, etc.).
-
-*** The Anti-Pattern (Double Finalisation)
-
-#+caption: Negative example: how double =fini= can happen
-#+begin_src ocaml -n
-(* Session.ml *)
-let run t =
-  Lwt.finalize
-    (fun () -> handle_network_io t)
-    (fun () -> fini t)  (* FIRST: session's own finalizer *)
-
-(* server.ml / accept_loop *)
-let%lwt () =
-  Lwt.finalize
-    (fun () -> Session.run session)
-    (fun () -> Session.fini session)  (* SECOND: caller also finalizes *)
-#+end_src
-
-This gives a bunch of problems: double fini-callback firing, double resource cleanup, confusing errors.
-
-*** The Fix: Clear Finalisation Boundaries
-- =Session.run= owns finalisation of session state (=pending_acks=, =msg_queue=)
-- =fini= callback (injected at construction of =Session=) owns finalisation of resources the session didn't create (socket, network channels [created by the session's owner])
-- Caller never re-finalises what =Session.run= already finalised, doesn't expect any =fini= functions to be idempotent
-
-The outcome is that =Session.run= is a complete, self-contained Lwt task. Caller just awaits it, doesn't finalise it.
-
-*** Decision: Each module finalises only what it owns
-- Session owns its internal state
-- Fini callback (injected @ creation of session) owns the fd/socket
-- Console owns its listeners, not stdin/stdout (those are process-global and borrowed @ the point when console is created)
-** Resource Ownership: File Descriptors (fds) vs Lwt_io Channels
-
-There's a decoupling between fds and the i/o channels we create to access them --- two different layers of abstraction.
-This was implicit, subtle behaviour and not understanding it led to a bunch of =EBADF= errors thrown.
-
-In my case, I wanted to be explicit about the network-resource cleanups (net-ic/oc ) @ client/server fini, but I didn't keep in mind that they're created from the same fd:
-   a) for clients:- it's the client socket that is created the client network socket that is created after dns resolution and connecting to the server
-   b) for server:- it's the client socket that is accepted when a client initiaties a connection that is used
-
-The default behaviour is that the channels own the resource (fd). =Lwt_io.of_fd ~mode:(input|output) fd= creates a channel that /*owns* the fd by default/. Therefore, closing a channel will close the fd within it.
-So, explicitly closing a net_ic and net_oc will lead to a double-close attempt on the fd. The second closing will lead to a EBADF error thrown.
-
-The solution to this comes in two forms:
-    A) tolerate the default (and implicit) auto-closing behaviour and avoid the double-closing problem
-    B) prevent the auto-closing behaviour and decouple the ownership of the fd from the channels. This allows explicit closing of net_ic and net_oc.
-
-I prefer the explicit action so I went with B. This means that my fini-function is the clear owner of the fd-resource-closing responsibility.
-
-#+begin_src ocaml -n
-(* NEGATIVE EXAMPLE *)
-let net_ic = Lwt_io.of_fd ~mode:Lwt_io.input client_socket in   (* owns client_socket *)
-let net_oc = Lwt_io.of_fd ~mode:Lwt_io.output client_socket in  (* also owns client_socket *)
-
-(* POSITIVE EXAMPLE *)
-let net_ic = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.input client_socket in   (* closing channel will flush that channel only *)
-let net_oc = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.output client_socket in  (* closing the channel won't close the fd *)
-(* By passing ~close:Lwt.return, we tell the channel: "when you close,
-   flush your buffer but don't close the underlying socket". This transfers
-   fd ownership to the on_fini callback. *)
-#+end_src
-
-*** The Double Close Bug
-#+caption: negative example: both channels own the same fd
-#+begin_src ocaml -n
-(* BAD: both channels own the same fd *)
-let ic = Lwt_io.of_fd ~mode:Lwt_io.input sock in
-let oc = Lwt_io.of_fd ~mode:Lwt_io.output sock in
-(* Closing ic closes sock; closing oc tries to close already-closed sock → EBADF *)
-#+end_src
-
-#+caption: Decoupling the ownership by making the close callback be a no-op
-#+begin_src ocaml -n
-(* GOOD: channels don't own the fd *)
-let ic = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.input sock in
-let oc = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.output sock in
-(* Closing transfers ownership to explicit fini *)
-#+end_src
-
-*** The ~close Parameter
-~close:Lwt.return tells the channel: "when you're done, flush your buffer but don't close the underlying fd."
-This allows:
-- Explicit, centralised fd ownership in =fini= functions
-- Predictable resource cleanup without double-close bugs
-- Clear mental model: the module that allocates the socket owns closing it
-
-*** Decision
-For explicit fd ownership, use =~close:Lwt.return= when creating channels from sockets.
-The =on_fini= callback becomes the single point of responsibility for closing the actual socket.
-** TODO [DOC] Test-writing Patterns: relying on test-generators and structured input types
-1. use test_frame_reader as the example for patterns included in using test-helpers
-
-
-* Error-/Failure-Modes
-
-This section brainstorms the type of =failures = {errors/exns/illegal-ux}= to handle. The code is already taking some shape, so it's a good time to consider these. It also doubles up as a test-plan for the cases to add sanity-tests for and protect against future regressions.
-
-Some of these modes come from the problem space, and some others are from the design and implementation choices.
-
-** Layer: Network I/O Errors
-Currently, all network I/O logic is bounded within =Session= (and =Frame_reader=, which it contains).
-
-Ref: [[https://ocaml.org/manual/5.4/api/Unix.html#1_Errorreport][Unix error report]] -- the errors within ocaml's unix lib
-***  EOF on socket reads as a normal disconnection path
-This is *expected behaviour*: for =read_into_exactly= to give =End_of_file=  on peer connection closing.
-
-This should NOT be treated as an Error. In server mode, this is exactly the place that allows the server to await new connections (and reuse the existing Server Socket).
-*** Peer Crashing / Connection Drop $\implies$ ECONNRESET
-*** Broken pipe errors when writing to a closed socket $\implies$ EPIPE
-*** Connection Refusal / Unable to Connect $\implies$ ECONNREFUSED
-*** Server startup::port already used $\implies$ EADDRINUSE
-*** Failure of DNS-resolution
-
-** Layer: Frame-Protocol  Errors
-Our custom frame protocol is implemented within =Frame= but the creation of frames is done in both rx and tx flows.
-
-These errors may be user-errors (to protect) or programming errors (to aggressively assert invariants) mainly.
-
-*** Format Problems: Unknown Frame Type
-*** Format Problems: negative =payload_sz= value
-- standardise to 1M payload size max?
-*** Payload Problems: payload too large
-
-** Layer: Session State and Lifecycle Errors
-This layer exists mostly because of my implementation choices.
-*** Ack for unknown =msg_id=
-- If there were retry mechanisms (not in the scope of the v0 impl) then this is not an impossible case -- so this should just set the precendent and be handled gracefully instead of failing or raising exceptions.
-*** Implementation Consequence: Panic when Callbacks not set when session needs it
-*** Handling of Pending acks @ session-end
-** Layer: User I/O, Console Errors
-*** User pressed Ctrl-D $\implies$ EOF on stdin $\implies$ termination signal
-*** Failure to write to =stdout= (e.g. closed stdout)
-- likely need to treat as shutdown signal
-*** Sending of Message without Active Session (from Server POV) $\implies$ graceful handling
-** Layer: Concurrency / Lifecycle Errors
-These are because of the concurrency model / choice of =Lwt= and some of it is also because of my own implementation choices / supervision patterns.
-*** =Lwt=-concurrency: =Lwt.cancel= on pending =stdin= reads because of safe-points
-*** Race condition: =rx_loop= EOF vs =tx_loop= write
-- This one server vs client handling might defer, can't blanket treat it as just termination signal in the server mode case
-*** =kill=-ing has to be Idempotent,  can't be Double-=kill=-ing
-*** =sending= blocked by thread-coordinating medium (=Lwt_mvar=) during shutdown
-*** problem: =Lwt.Canceled= not being handled during shutdown
-When a task is cancelled (via =Lwt.pick= or =Lwt.cancel=), it raises =Lwt.Canceled=.
-This is NOT an error; it's a shutdown signal so it must be caught and handled cleanly.
-*** problem: double =fini= of resources is likely a code smell
-Need to avoid patterns where both module and caller finalise the same resource ---  need to define clear ownership boundaries: /who allocated it owns finalising it/.
-
-An argument may be made that IF the finis are idempotent then we can use a [[https://limeup.io/glossary/belt-and-suspender-rule/][belt-and-suspenders pattern]] here BUT this is very strict/rigid of an expectation (for the fini to be idempotent).
-
-** Layer: Startup Errors (Server / Client Mode)
-*** User-input: Invalid bind address passed
-*** User-input: Invalid port passed in
-
------
-** Layer: Memory Leaks
-Socket usage and such -- there's a need to ensure no mem leaks
-
-Would be nice to add this to my tests.
-
-* Knowledge Gaps and Learnings
-** Tooling / Ecosystem Choices and Learnings
-*** Concurrency: use =Lwt= first, if all goes right, it should be possible to demo the migration to =Eio=
-- I'm equally green when it comes to both. Given that the community seems to be tending towards effects based io, it makes sense to also gain the ability to do a migration from =Lwt= to =Eio=.
-- A cursory check implies that their cancellation semantics will be different since one is about cooperative concurrency and the other is structured concurrency
-  - therefore, I should try to avoid making the cancelling logic too integrated with =Lwt=-style
-
------
-*** TODO [DOC] Why =Lwt_result= gives me doubt and why =Result= resolves that doubt
------
-**  Lwt lifecycle patterns: pick vs join, finalisation ownership
-=Lwt.pick= provides coupled supervision (clean shutdown paths). =Lwt.join= provides decoupled execution (blocking behavior).
-
-The learning is that we should choose based on:
-   * do the tasks have a shared fate (both should die together) $\implies$ =Lwt.pick=,
-   * do the tasks have independent fates (one dying shouldn't affect others)? $\implies$ =Lwt.join=
-
-Finalisation must have clear ownership, remember to avoid double-finalisation by having only the owner finalise a resource $\implies$ RAII-intuition
-** Lwt Task Supervision for Infinite Loops demands  Explicit Cancellation Semantics
-When supervising infinite loops (like =accept_loop=) with =Lwt.pick=
-
-- =Lwt.pick [ task1; task2 ]= attempts to cancel the other task when one completes
-- Infinite loops must explicitly handle =Lwt.Canceled= or scheduling races occur
-- Pattern: wrap loop in =try%lwt ... with Lwt.Canceled → Lwt.return_unit= for explicit cancellation handling
-
-Without this, we may see deterministic output ordering issues where cleanup
-prints before the cancelled task has a chance to exit gracefully.
-** Lwt Sytax Sugar Trip-ups
-There's a bunch of places where I ended up getting stuck because of use / lack of use of lwt syntax sugars.
-
-for example,   on a quick read, I didn't register that this is a eager promise evaluation so the task has already been started at the point after we call =Lwt.catch=.
-
-#+caption: using the Lwt.catch syntax somehow made me thing that the task hasn't been started yet
+** 1. Lwt_mvar for TX coordination: natural backpressure by default
+
+=rx_loop= and =tx_loop= are counterparts that cooperate when interfacing with the internet. That's the primary responsibility of the =Session= module. These loops need to message pass to do so, and the following options were some options:
+  1. =Lwt_mvar=: single-slot mailbox
+  2. =Lwt_stream=: unbounded
+  3. Bounded Queue: would have to be handrolled / lib use
+  4. Unbounded Queue
+
+=Lwt_mvar= won because it's the simplest thing that could work. Single-slot means =Console.send_message= blocks on =put= until =tx_loop= calls =take=.  Meaning, it creates a natural backpressure: if the network is slow, typing feels slow. For human typing speed over TCP, this is desirable because it gives a natural UI characteristic that encodes network condition. Things should work alright for a human-timing speed application.
+
+There's tradeoffs that are clear:
+  * can't queue messages ahead of time
+  * instant pasting would be limited by said backpressure
+
+*Evolution Path:* If this was more serious, with stricter requirements, then a bus is something to look for -- streams or bounded data structures might work there.
+
+
+** 2. Console lives at application scope, not session scope
+<<dd_2>>
+
+This is one of the more important architectural decisions, and it took a couple of iterations to get right.
+
+If =Console.run= lives inside per-session handlers:
+   1. It restarts per session (wasteful), losing =stdin= / =stdout= state
+   2. Closing stdin on first =EOF= breaks subsequent sessions
+   3. It blocks =accept_loop= from awaiting new clients
+
+The surviving pattern:
+  1. =Console= is created once at server startup, sessions are bound/unbound from it.
+  2. Sessions are ephemeral within the console's lifetime.
+     - This maps correctly to reality — the operator's terminal outlives any individual chat session.
+
+A 2^{nd}-order problem comes out of this:
+  1. chicken-and-egg :
+     a) Console exists before any session does
+     b) So there's a window where the console has no session bound.
+     c) The dispatch logic handles this gracefully using  =maybe_send_msg=:  tells the operator that  "You're not in an active session" rather than crashing.
+
+** 3. Two-phase init of Session / Console: =create= $\implies$ bind_session
+
+A consequence of [[dd_2][the console-scope being app-level]] , =Console= and =Session= have *different lifecycles*, but they need each other to operate: =Console= needs =Session= to send messages, =Session= needs =Console= callbacks to display received messages.
+
+The resolution is a two-phase init:
+   1. =Console.create= and =Session.create= are independent
+   2. =Console.bind_session= wires them together by installing callbacks
+
+This keeps both constructors pure (no mutable state needed at creation of =Session=, =Console=) and makes the binding point explicit. The binding routine is also effectful (sets =t.session= and installs callbacks), modifying a clear state-record within =Session.t=.
+
+The =unbind_session= counterpart exists for when a session ends but the console continues (server mode). The bind/unbind pair is the console's commit point for dispatchability -- after which they're ready to collaborate with each other.
+
+** 4. RAII-style ownership: creator is destroyer
+
+The intuition for RAII is second-nature but the need for it here (because of the resource management aspects) needed me to face some friction via a real bug.
+
+Early versions had harnesses (server/client) inject =on_fini= callbacks into services (session/console). The intent was that services know /when/ teardown happens, so they should trigger cleanup. The problem with this is that services became trigger points for resources they didn't create, and this inversion of control made error propagation impossible  to be done cleanly --  services couldn't signal /why/ they exited because they were busy calling callbacks. All-to-familiar callback-hell.
+
+The fix to this was that *each module finalises only what it owns*. Session owns its internal state (=pending_acks=, =msg_queue=). The harness owns the socket and channels it created. =Lwt.finalize= at the harness level stacks cleanups correctly.
+
+There's some invariants to keep in mind for this:
+   1. Module creates resource $\implies$ module owns cleanup
+   2. Harness orchestrates $\implies$ harness stacks cleanups in its own =Lwt.finalize=
+   3. Errors propagate upward $\implies$ exceptions trigger finalizers at the right level
+   4. No injected callbacks $\implies$ no hidden contracts that get hard to trace
+
+** 5. Explicit fd ownership via =~close:Lwt.return= noops @ channel-creation
+
+This came from a funny =EBADF= bug that happens because of implicit behaviours.
+
+=Lwt_io.of_fd ~mode:input fd= creates a channel that /owns/ the fd by default ([[https://ocsigen.org/lwt/2.6.0/api/Lwt_io][see docs]]). So if you create both =net_ic= and =net_oc= from the same socket fd, closing one channel closes the fd, and closing the other raises =EBADF=. That's mindboggling given that it's a one-liner default behaviour within the docs. The wisdom of RTFM  persists.
+
+The fix: pass =~close:Lwt.return= when creating channels from sockets, which is just a no-op that just flushes the buffer without touching the underlying fd.  Fd ownership transfers to the harness's =fini= function, which closes the socket exactly once. This is an explicit-approach to the same ownership approach and explicit approaches are easier to ingrain than implicit behaviours.
+
+#+caption: no-oping the callback injected for closing of the channel
 #+begin_src ocaml
-(** NOTE: switch is threaded in to consolidate cleanup routines *)
-let make_output_spy switch =
-  let p = make_pipe_with_switch switch in
-  let lines = ref [] in
-  let capture_task =
-    let rec read_and_capture_line_loop () =
-      let%lwt line = Lwt_io.read_line p.rd in
-      lines := !lines @ [ line ];
-      read_and_capture_line_loop ()
-    in
-    Lwt.catch read_and_capture_line_loop (function
-      | End_of_file -> Lwt.return_unit
-      | Lwt.Canceled -> Lwt.return_unit
-      | Lwt_io.Channel_closed _ -> Lwt.return_unit
-      | e -> Lwt.fail e)
-  in
-  { pipe = p; lines; capture_task }
+(* channels don't own the fd *)
+let net_ic = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.input sock in
+let net_oc = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.output sock in
+(* harness fini closes sock explicitly, exactly once *)
 #+end_src
 
-it's because I'vebeen using the sugar form =try%lwt ... with= ...
-#+caption: my preferred approach that makes the eager evaluation of promises clearer to me
+This pattern is applied consistently in both =server.ml:run_single_session= and =client.ml:run_client=. The test harness uses the same pattern via =make_pipe_with_switch=.
+
+** 6. Basic Concurrency Primitives Frames as Supervisor Policies: 3-way pick w condition variable for session supervision
+
+=Session.run= needs to do three things concurrently:
+   1. =rx_loop=: read and dispatch incoming frames
+   2. =tx_loop=: take payloads from mvar, send as frames
+   3. =await_shutdown_signal=: wait for explicit shutdown (e.g. operator types =/quit=)
+
+#+caption: One for all, all for one
 #+begin_src ocaml
-(** NOTE: switch is threaded in to consolidate cleanup routines *)
-let make_output_spy switch =
-  let p = make_pipe_with_switch switch in
-  let lines = ref [] in
-
-  let rec read_and_capture_line_loop () =
-    let%lwt line = Lwt_io.read_line p.rd in
-    lines := !lines @ [ line ];
-    read_and_capture_line_loop ()
-  in
-
-  let capture_task =
-    try%lwt read_and_capture_line_loop () with
-    | End_of_file -> Lwt.return_unit
-    | Lwt.Canceled -> Lwt.return_unit
-    | Lwt_io.Channel_closed _ -> Lwt.return_unit
-  in
-
-  { pipe = p; lines; capture_task }
+Lwt.pick [ rx_loop t; tx_loop t; await_shutdown_signal t ]
 #+end_src
 
-this took a LONG time to debug (when creating the e2e test harnesses) because I kept brushing over this part and not realising that the task had already been called so I didn't even consider lifecycle problems here and was chasing termination problems.
+=Lwt.pick= gives coupled-fate semantics: when any path completes or fails, the others are cancelled. That works well for our needs for server:  if the network dies (=rx_loop=,  =EOF=), there's no point continuing to send. If the operator quits (shutdown signal), both loops should stop.
 
-Anyway the purpose of capturing the task like that is so that we can await it's completion later (explicit teardown).
+The =Lwt_condition= approach for shutdown gives immediate cancellation without polling. A naive alternative would be a =bool ref= checked in each loop iteration, which introduces polling latency and is harder to test. The condition variable approach is idiomatic Lwt and the shutdown path is testable in isolation.
 
-* Refactor
+While these are relatively basic primitives to =Lwt=, it's also early in my usage of this monadic, promise-based approach to coopeerative concurrency, that's why they stood out to me and appear here.
 
-** Patterns
-There are some useful patterns that exist that should be encouraged in areas that they may be relevant but aren't there yet:
-1. error handling patterns
-   a) should the network errors also be wrapped as custom errors? technically what matters is how they're handled so it's more of a routing it to the correct effect is what's importatnt here
-   b)
-**  Antipatterns
-*** [ ] explore the use of a common process switch which should make it easier to manage lifecycle
+** 7. Typed exit reasons: the single biggest testing unblock
 
-- the test harness have such a switch, it's something primitive to alcotest-lwt too. That pattern is beautiful, but resource management and timing needs to be handled well so that we don't end up doing writes to closed channels and so on
-- currently using the callback pattern can be really horrible because of the classic callback hell, though the purpose of the callbacks is limited to just displaying things so it's not that risky yet -- though it's also good to NOT allow future evolution into callback hell because of bad decision now
+Earlier, =Session.run= returned =unit Lwt.t=. Tests could only assert "did it run without crashing." This was blocking progress on writing meaningful tests — I kept adding spy hacks to the test harness to work around the lack of information about /why/ a session exited.
 
-*** [ ] simplify: no more factories, no more listeners
- - it's tagged in the code already
- - the main objective is: "when user types text, send it via session; when user types /quit, shutdown session; when no session, show a message". This doesn't need a listener pattern with observers and so on --- which would make it harder to trace code
-   a) The listener pattern would likely be relevant if we had plugin-style extensibility or if listeners were added/removed at runtime by external code.
-   b) most likely ideal place to introduce this: For now, the 2-phase session init, with console binding session and unbinding session gives a clean commit point on when to handle the /dispatchability/.
+The correct response to that friction was to improve the code, not the test hacks. Now:
 
-  *Verdict: This needs to be done. it should be possible to just do a giant dispatch table*
-**  Chores
-*** [ ] 1: string enums in one place
- - central place for display messages and strings =lib/text/session_text.ml=
- - makes test-writing more maintainable
- - helper msg (e.g. slash helper cmd)
- - prefix patterns
- - display formatters
-*** [ ] 2: Add render_cb functions similar to the
-*** [ ]  standardise everything to lwt infix syntax
- - [ ] no Cancel, just =try%lwt=
-    - it tripped me up once before
- - [ ] Dont use monad bind op (~>>=~), use the structured form  instead (=let%lwt () ==)
-    - feels more like structured concurrency -- easier to read imo
-*** [ ]
-*** [ ] simplify the module ref names
- - e.g. =Lwt_io= -> =LIO=
-* Backlog
-** [ ] Connection Timeout
-What kind of half-decent network protocol has no timeout?
-** [ ] Include logging
-Can't imagine life without it but it's also a lot of config work that can be spent on improving the actual code
+#+caption: Tell me, why did you leave?
+#+begin_src ocaml
+type exit_reason =
+  | Peer_disconnected
+  | Lost_conn of string
+  | Broken_pipe
+  | Protocol_error of Frame.error
+  | Unexpected of exn
 
-*Verdict: deferred to the end*
+exception Session_exit of exit_reason
+#+end_src
 
-** [ ] Busy messages because we can't rely on OS-level rejection for deterministic test / rejection behaviour
-
-The kernel enforces a minimum effective backlog — on modern Linux kernels, listen(fd, 0) is silently treated as listen(fd, 1) (or sometimes higher, depending on net.core.somaxconn and kernel version). POSIX says the backlog is a hint, not a contract.
-
-So need some app-logic for this.
-
-Accept the connection, send a Close frame (or a new Busy frame type if you want to be explicit), then close the socket.
-
-Sketch:
+Tests can now assert =Lost_conn= vs =Protocol_error= vs clean exit with pattern matching. The same applies to Console:
 
 #+begin_src ocaml
-(* In accept_loop, when session is active *)
-| Some _active_session ->
-    let%lwt client_socket, _ = Lwt_unix.accept server_socket in
-    (* Reject: send Close frame and disconnect *)
-    let oc = Lwt_io.of_fd ~close:Lwt.return ~mode:Output client_socket in
-    let%lwt () = Lwt_io.write_from_exactly oc (Frame.to_bytes Frame.Close) 0 ... in
-    let%lwt () = Lwt_io.flush oc in
-    Lwt_unix.close client_socket
-
-
+type error = Terminated | Channel_closed of string | Io_error of ... | Unexpected of exn
 #+end_src
 
-But this requires restructuring =accept_loop= to not block on =Session.run= — you'd need to =Lwt.async= the session and keep accepting. That's the multiplexing evolution path
+The harness catches these typed exits and has the opportunity to decide policy by themselves: restart session (server), keep accepting, crash gracefully. These are essentially supervision policies, and they're explicit in the code. This aspect is familiar from the Elixir world, which sometimes matches with the framing of problems here in OCaml...
 
-*Current verdict: Deferred till everything is done*
-* Future Extension Considerations
------
+** 8. Direct dispatch replaced the listener pattern
 
+I initially built a *dynamic listener registration system* (=create_send_msg_listener=, =session_listener_factories=, =register_listeners=). It fit a /mental model of extensibility/: add behaviour by registering listeners. In practice, it added dynamic indirection without benefit.
+
+The actual requirement of "when user types text, send it via session; when user types =/quit=, shutdown session; when no session, show a message." This is a mere static dispatch table, not a dynamic observer pattern, though.
+
+The refactor to a direct pattern match in =run_console= was a reduction in code, a reduction in indirection, and an improvement in traceability. Each event handler is co-located and visible. Binding/unbinding of sessions became simpler.
+
+
+#+begin_src ocaml -n
+let run_console t =
+  let break_with error =
+    let msg = Format.asprintf "%a" pp_console_error error in
+    let%lwt () = Lwt_io.eprintf "%s\n" msg in
+    Lwt.fail (Console_exn error)
+  in
+  let rec loop () =
+    let%lwt line = Lwt_io.read_line t.ic in
+    match parse_user_input line with
+    | Some User_close -> maybe_shutdown_session t >>= loop
+    | Some User_exit -> Lwt.return_unit
+    | Some (Send_msg bs) -> maybe_send_msg t bs >>= loop
+    | Some (Slash_cmd "/help") -> show_help t >>= loop
+    | None | Some (Slash_cmd _) -> loop ()
+  in
+  try%lwt loop () with
+  | End_of_file | Lwt.Canceled -> Lwt.return_unit
+  | Lwt_io.Channel_closed reason -> break_with (Channel_closed reason)
+  | Unix.Unix_error (e, op, arg) -> break_with (Io_error (e, op, arg))
+  | e -> break_with (Unexpected e)
+#+end_src
+
+The listener pattern would be justified if: multiple independent handlers needed to observe the same event (i.e. a fanout of event dependencies), or runtime (de)registration was required. Neither applies here. Knowing when to simplify is as important as knowing when to abstract.
+
+** 9. Error domain separation in Frame_reader
+
+=Frame_reader= distinguishes between two fundamentally different error categories:
+
+#+begin_src ocaml
+type error =
+  | Connection_lost of string    (* network-level: EOF, ECONNRESET *)
+  | Protocol_error of Frame.error (* protocol-level: bad type, oversized payload *)
+#+end_src
+
+This matters because Session can make different decisions based on which error it gets. A =Connection_lost= is an expected lifecycle event (peer left). A =Protocol_error= means *the byte stream is desynchronised and recovery is impossible*  (NOTE: for a binary TLV protocol, there's no way to find the next frame boundary after corruption, the connection has to be re-established).
+
+This /compositional error hierarchy/ flows upward cleanly: =Frame.error= wraps into =Frame_reader.error= wraps into =Session.exit_reason=.
+
+** 10. =Format.formatter= for error representation
+
+Errors use =Format.formatter= (=pp_error=, =pp_exit_reason=) instead of string-based approaches. This aligns with OCaml ecosystem conventions and gives concrete benefits:
+
+   1) Composability: nested errors format naturally via =%a= without intermediate string conversions
+   2) Deferred evaluation: no allocation overhead when the error isn't printed (except if I use some hacky bridge helper functions )
+   3) Testing: errors can be formatted to a buffer and asserted without hidden string construction
+   4) Evolution: when error formatting gets complex, =pp= scales naturally via composition
+
+The switch from =Failure "some string"= to =Session_exit (Protocol_error (Unknown_frame_type 0xFF))= was *the shift from stringly-typed to actually typed errors*.
+
+* Protocol Design Notes
+
+** The =Lwt_io= buffering bargain $\Leftarrow$ TCP saves our soul
+
+=Frame_reader= has NO partial-read accumulation logic. This is deliberate, and it's somethign we can afford to do here :
+  * =Lwt_io.read_into_exactly= handles partial TCP reads internally:  blocks until exactly =N= bytes are available, buffering across TCP segments. This is why =Frame_reader= is ~30 lines instead of ~150. =Lwt_io= is the accumulator.
+  * there's a tradeoff:
+    - we lose the ability to *inspect partial frames for protocol error recovery*.  For a binary TLV protocol where a malformed frame kills the session anyway (you can't resynchronise thenafter), this is the right tradeoff.
+
+For all the other complex networking problems, we stand on the shoulder of giants and just use TCP/IP as though it's magic bytestream that just works.  Saves us having to deal with:
+   1. packet drops and retransmissisons
+   2. correctness checking, verification of packets...
+
+** Int32.to_int assumes 64-bit
+
+In =Frame.parse_header_bytes=, payload size extraction does =Bytes.get_int32_be bs payload_size_offset |> Int32.to_int=. On 64-bit Linux (the target), =int= is 63 bits so all valid =int32= values fit. On 32-bit systems, =Int32.to_int= silently truncates. This should be safe on all modern Linux deployments.
+
+** Message IDs are 1-based
+
+=next_msg_id= *pre-increments*: the counter initialises to =0l= and the first message gets =id = 1l=. So =id = 0l= is never used on the wire. If a peer sends =Ack { id = 0l }=, it's treated as a spurious ack (no pending message with that id). This is implicit:  no explicit reserved-id check exists.
+
+** Max payload guard fires before allocation
+
+=Frame_reader.read_frame= calls =parse_and_validate_header_bytes= before =Bytes.create payload_sz=. The =max_payload_size= check (1MB) fires before any allocation happens. Without this, a malicious peer sending a header with =payload_sz = 2_000_000_000= would *OOM the process* before the error was detected. This was identified during a phase where the error mode enumeration and handled correctly from the start.
+
+
+* Concurrency Safety Notes
+
+** Hashtbl safety under cooperative scheduling
+
+=pending_acks= is a mutable =Hashtbl= accessed from two concurrent Lwt tasks: =tx_loop= (on message send: =Hashtbl.add=) and =rx_loop= (on ack receipt: =Hashtbl.find_opt=, =Hashtbl.remove=).
+
+This is safe implicitly because of  *Lwt's is cooperative concurrency* and neither =Hashtbl.add= nor =Hashtbl.find_opt= yields to the scheduler. There are no yield points between the hashtbl access and the next yield, so no interleaving is possible.
+
+This note feels super basic except: if this example codebase were to be migrated to =Eio= (structured concurrency with true parallelism), this would need some sort of shared-variable sync e.g. mutex or an atomic map.
+
+** Session_meta.peer.addr is mutable, updated in background
+
+=Session_meta= does *best-effort hostname resolution* via =Lwt.async=. The =peer.addr= field is =mutable= and is updated in-place when DNS responds (within 300ms timeout). The connection banner is displayed before DNS completes, so it shows the IP address. Any subsequent display (e.g. disconnect message) may /show the resolved hostname/. This is intentional: human-readable names are a nice-to-have, not a correctness requirement.
+
+Under cooperative scheduling, the mutation is safe: the DNS callback runs when the current task yields, and string assignment is atomic in OCaml.
+
+** The closed-over oc in callbacks
+
+=make_console_callbacks= closes over =t.oc= at binding time. If =t.oc= were ever reassigned (it isn't currently), the callback would use the stale channel. This is safe because =Console.t= has no mechanism to swap output channels after creation. If that changed (e.g. terminal reconnect), callbacks would need to be rebound.
+
+
+* Lowlights
+
+There were two notable detours that cost time.
+
+** The double-fini bug
+
+Early versions had =Session.run= calling =Lwt.finalize= with its own fini, AND the =accept_loop= wrapping =Session.run= with another fini that called =Session.fini=. Resources were finalised twice. The second close would raise =EBADF=.
+
+It's the classic entering of callback hell (fini functions are =unit -> unit Lwt.t=, so it's you can call them as many times as you like) so can't be protected by the OCaml's type system here.
+
+Takeaway: feels like when fighting resource cleanup bugs, the problem is almost always unclear ownership more so than insufficient cleanup.
+
+** The listener pattern overengineering
+
+I built a full dynamic listener/observer system for console event dispatch (=create_send_msg_listener=, =session_listener_factories=, =register_listeners=). It took non-trivial time to wire up correctly and made the console harder to trace.
+
+*The actual requirement was a 10-line pattern match*. The listener pattern would have been justified for plugin-style extensibility or runtime (de)registration. Neither constraints even applied here. The refactor to direct dispatch deleted code, reduced indirection, and made the console readable (and testable) again.
+
+The lesson: classic case where problems should be solved on feeling friction, else it's just classic premature abstraction. The git history will show the cost of this for this simple chat application.
+
+* Won't Fix (v0 Scope)
+
+Wontfixes are choices worth making too.
+
+** Connection timeout
+
+No timeout on =Lwt_unix.connect= or =Lwt_unix.accept=. The =timeout= field exists in =network_config= (both server and client) but is never wired in. The correct implementation is =Lwt_unix.with_timeout= wrapping the connect/accept calls. Deprioritised really, will try to add it in.
+
+** Logging framework
+
+=log_level= exists in =terminal_config= but =Logs= is never initialised. All diagnostics currently go to stderr via =Lwt_io.eprintf=. The correct implementation is =Logs.set_level= at startup and =Logs.info=, =Logs.err= throughout. Omitted because the current diagnostic output is sufficient for review and the wiring is boilerplate.
+
+The pattern of using =pp_*= pretty printers should make it easier to adapt to using =Logs= as well.
+
+** Busy rejection for concurrent connection attempts
+
+This part is more of an assumption on the requirements. For good UX, I would have wanted to have explicit busy-rejections when a 2nd clients attempts to connect to a server while there's an ongoing active chat session. I'm treating it as undefined behaviour for now because it's a 1:1 chat.
+
+The evolution path for this is manageable. It CAN'T relyon the OS-backlog value because that's a best-effort value (referring to =listen server_socket 1=) -- the kernel enforces a minimum effective backlog that varies by version, so the queueing is non-deterministic.
+
+Correct implementation for this would be to accept the connection, send a =Close= frame, close the socket. Would need a small restructuring =accept_loop= to not block on =Session.run=, *which is the multiplexing evolution path* (many active chat sessions).
+
+For v0, the limitation is assumed to be accepted and documented here.
+
+* Evolution Paths
+
+Just some natural evolution paths about where teh current code could go naturally:
+
+** Multiplexing (multiple concurrent sessions)
+
+=Session.run= already encapsulates its lifecycle. The minimal change for multiplexing: =Lwt.async (fun () -> Session.run session)= in =accept_loop= instead of blocking on it. The accept loop keeps running, each session manages itself. The OS backlog handles queueing during async session setup.
+
+The =Console= would need to be aware of multiple sessions (currently it holds =session : S.t option=, would need =session : S.t list= or an active-session selector). The dispatch table would need a target-session argument.
+
+Current slash command offer a clean UI component for operators to manage sessions and so on, even though this isn't a full TUI application or anything.
+
+** Eio migration (structured concurrency)
+
+The architecture was designed with concurrency model swappability  in mind: cancellation semantics are explicit (=Lwt.Canceled= handlers everywhere), mutable state is documented as cooperative-only, and the supervision model (harness catches typed exits, decides policy) likely maps naturally to Eio's structured concurrency approach.
+
+The main changes like touch the following pattern: =Lwt.pick=  $\rightarrow$ =Eio.Fiber.any=, =Lwt_mvar= $\rightarrow$ =Eio.Stream=, =Lwt_condition= $\rightarrow$ =Eio.Condition=, =Lwt_io= channels $\rightarrow$ =Eio.Flow=. The =pending_acks= Hashtbl would need a mutex or some other atomic datastructure under Eio's parallelism.
+
+** TUI replacement (Notty/Minttea)
+
+The current UI is line-based, like an IRC chat --  via =Lwt_io.read_line=. Console's =ic/oc= are injectable, so a Notty-based input module could replace =run_console= without changing Session, Frame, or the harnesses. The separation between user I/O (Console) and network I/O (Session) was designed with this replacement in mind.

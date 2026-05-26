@@ -31,6 +31,7 @@ let with_timeout ?(secs = 2.0) thunk =
   in
   Lwt.pick [ thunk (); timeout ]
 
+(** Foundational test helper; cleanup of channels and fds are de-coupled.*)
 let make_pipe_with_switch switch =
   let fd_rd, fd_wr = Lwt_unix.pipe () in
   let rd = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.input fd_rd in
@@ -64,7 +65,10 @@ type capture_spy = {
   capture_task : unit Lwt.t;
 }
 
-(** NOTE: switch is threaded in to consolidate cleanup routines *)
+(** Eager evaluation of this means that the spy this creates will be live from
+    construction.
+
+    NOTE: switch is threaded in to consolidate cleanup routines *)
 let make_output_spy switch =
   let p = make_pipe_with_switch switch in
   let lines = ref [] in
@@ -85,8 +89,6 @@ let make_output_spy switch =
     | e -> Lwt.fail e
   in
   { pipe = p; lines; capture_task }
-
-let captured_text cap = String.concat "\n" !(cap.lines)
 
 (** Returns a serialised frame (a byte segment) using [typ] [id] [payload] (msg
     payload) without any validation, so illegal byte segments can be created
@@ -118,6 +120,10 @@ let msg ?(id = 1l) payload_str =
 let ack id = F.Ack { id }
 let close_frame = F.Close
 
+(** Creates a testable format that wraps [Frame]. Uses structural equality via
+    serialised bytes instead of structural comparison on the variant --- extra
+    benefit of being able to demonstrate the codec symmetry as a side-effect of
+    every frame-comparison. *)
 let frame_testable =
   let is_equal a b = F.to_bytes a = F.to_bytes b in
   Alcotest.testable F.pp is_equal

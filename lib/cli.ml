@@ -68,6 +68,7 @@ let log_level_arg =
     & opt (enum levels) default_level
     & info [ "log-level" ] ~docv:"LEVEL" ~doc)
 [@@warning "-45-44"]
+(* it's an intensional name shadow here [ A.* ], hence the parentheses *)
 
 let port_server_arg =
   let default = 4242 in

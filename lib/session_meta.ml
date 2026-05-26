@@ -23,7 +23,14 @@ let maybe_resolve_hostname_bg peer sockaddr =
 
 type t = { me : peer; them : peer; connected_at : float }
 
-(** NOTE: [sock] should be the connecting socket*)
+(** Tries a best-effort approach of using the socket to do DNS resolution to
+    resolve hostnames involved in the chat session.
+
+    NOTE: [of_sock] is expected to be called immediately after connection
+    establishment, before the connecting socket, [sock], is handed to Session.
+    At this point, [sock] is guaranteed to be open. If [getsockname] or
+    [getpeername] raises EBADF, it indicates a bug in the Session creation logic
+    (e.g., premature socket closure). This shall be left defenceless. *)
 let of_sock sock =
   let me_addr = Unix.getsockname (Lwt_unix.unix_file_descr sock) in
   let them_addr = Unix.getpeername (Lwt_unix.unix_file_descr sock) in

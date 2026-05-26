@@ -1,4 +1,4 @@
-(** Unit tests are actually definitions of test-generators that take in a
+(** Unit tests in this codebase are more of test-generators that take in a
     structured input so that we can massively enumerate many varitions of
     properties. The record types here are "data-structures" that define inputs
     for such test-generators. *)

@@ -414,3 +414,4 @@ There's some remnants of chaos in the code still.
 =test_simultaneous_sends_no_deadlock= and =test_burst_messages_all_delivered= are marked with =NOTE [TEST] POSSIBLE FLAKY TEST= in comments.
 
 The possible reason is that =Lwt.both= fires two writes into the cooperative scheduler, but Lwt's cooperative model likely means one side may complete before the other even starts. The test is not strictly testing /simultaneous/ sends; it is supposed to be testing /non-deadlocking/ sequential sends close in time.
+

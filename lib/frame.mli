@@ -4,8 +4,8 @@ type error =
   | Header_too_short
   | Payload_too_short
   | Unknown_frame_type of int
-    (* TODO: improve guard meaning, possibly add another error type: validate_payload_sz error semantics for negative sizes are wrong. Payload_too_big { sz = -42; max = 1_000_000 } — a negative payload size is not "too big", it's invalid. Should be a separate Invalid_payload_size variant or at minimum the Payload_too_big error message should handle this case explicitly. *)
   | Payload_too_big of { sz : int; max : int }
+  | Invalid_payload_sz of { sz : int; max : int }
 
 type t =
   | Msg of { id : msg_id; payload : bytes }

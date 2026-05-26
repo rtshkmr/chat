@@ -4,8 +4,6 @@ module F = Frame
 module FR = Frame_reader
 
 type exit_reason =
-  (* DEPRECATED: this can likely be removed, I'm okay with merging it with Lost_conn *)
-  | Peer_disconnected  (** Received Close frame: clean, expected termination. *)
   | Lost_conn of string  (** EOF/ECONNRESET: peer gone without a Close frame. *)
   | Broken_pipe  (** EPIPE on tx — we tried to write to a dead socket. *)
   | Protocol_error of Frame.error  (** Got a frame that violates protocol. *)
@@ -14,9 +12,7 @@ type exit_reason =
 exception Session_exit of exit_reason
 exception Session_invariant_violated of string
 
-(* TODO:[UI,POLISH] add in prompt *)
 let pp_exit_reason fmt = function
-  | Peer_disconnected -> Format.fprintf fmt "peer disconnected cleanly"
   | Lost_conn reason -> Format.fprintf fmt "connection lost: %s" reason
   | Broken_pipe -> Format.fprintf fmt "broken pipe (peer closed write end)"
   | Protocol_error e -> Format.fprintf fmt "protocol error: %a" Frame.pp_error e
@@ -33,8 +29,18 @@ type console_callbacks = { on_rx : rx_event -> unit Lwt.t }
 type state = {
   msg_id_counter : int32 ref;
   pending_acks : (F.msg_id, float) Hashtbl.t;
-  msg_queue : bytes Lwt_mvar.t;  (** Used for coordinating payloads for tx*)
+  msg_queue : bytes Lwt_mvar.t;
+      (** Used for coordinating payloads for tx. It's a single slot (not really
+          a queue). If network is slow, tying will block but this is a good
+          thing because that 's an intuitive way of making the user feel the
+          network condition (net-lags --> slow typing inputs)*)
 }
+(** Shared mutable state within a session. Under Lwt's cooperative scheduling,
+    these are safe: no two coroutines access them simultaneously because there's
+    no yield point between read-modify-write sequences
+
+    This (the concurrency model) should be kept in mind when considering future
+    migrations e.g. to Eio. *)
 
 (* TODO[POLISH] consider renaming ic/oc to net_ic/net_oc *)
 type t = {
@@ -71,7 +77,6 @@ let tx_frame { oc; _ } f =
   let%lwt () = Lwt_io.write_from_exactly oc bs 0 bs_len in
   Lwt_io.flush oc
 
-(* TODO: [POLISH] better naming, this is only for user-generated msgs *)
 let send_message { state = { msg_queue; _ }; _ } payload =
   Lwt_mvar.put msg_queue payload
 
@@ -90,7 +95,6 @@ let resolve_and_get_sent_at { state = { pending_acks; _ }; _ } msg_id =
       Ok ts
   | None -> Error "not awaiting"
 
-(** TODO: [DOCS] document exn raised *)
 let get_cbs_exn { callbacks; _ } =
   match !callbacks with
   | None ->
@@ -152,8 +156,8 @@ let tx_loop ({ state = { msg_queue; _ }; _ } as t) =
   let rec loop () =
     let%lwt payload = Lwt_mvar.take msg_queue in
     let id = next_msg_id t in
-    let%lwt () = tx_frame t (F.Msg { id; payload }) in
     track_pending_frame t id;
+    let%lwt () = tx_frame t (F.Msg { id; payload }) in
     loop ()
   in
   loop ()
@@ -161,6 +165,12 @@ let tx_loop ({ state = { msg_queue; _ }; _ } as t) =
 let await_shutdown_signal { shutdown_cond; _ } =
   Lwt_condition.wait shutdown_cond
 
+(** Supervises 3 loops at the same time: * [rx_loop]: continuously loops to
+    receive network inputs * [tx_loops]: continuously loops to send network
+    output * [await_shutdown_signal]: awaits a terminal signal
+
+    The fate of all 3 loops is coupled: any of them resolves, the rest are
+    cancelled. *)
 let run t =
   let exit_with reason =
     let msg = Format.asprintf "%a" pp_session_exit_reason reason in
