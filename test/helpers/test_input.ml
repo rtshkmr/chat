@@ -1,38 +1,8 @@
 open Chat
+open Input_types
 module F = Frame
 module FR = Frame_reader
 module TH = Test_helpers
-
-type 'a t = { desc : string; bytes : bytes; err : 'a }
-
-type freader_streaming_input = {
-  name : string;
-  frames : F.t list;  (** for multiple dispatches *)
-  intent : string;
-}
-(** Allows for multiple frame dispatches to verify frame boundaries at incoming
-    byte-stream (multiple frames in sequence)*)
-
-type freader_edge_case_input = {
-  name : string;
-  frame : F.t;
-  check_frame : F.t -> unit Lwt.t;
-}
-(** Allows for tc generation with single dispatch and custom frame assertions.*)
-
-type freader_conn_loss_input = {
-  name : string;
-  init : Lwt_io.output_channel -> unit Lwt.t;
-      (** What data to write before closing (simulates partial transmission) *)
-  check_error : FR.error -> unit Lwt.t;
-      (** Verify that we got the right error *)
-}
-
-type freader_protocol_input = {
-  name : string;
-  frame_bytes : bytes; (* Raw bytes, possibly malformed *)
-  expect_error : FR.error -> unit Lwt.t;
-}
 
 (** A torture payload: 1. "Fireball" written in multiple languages 2. UTF-8
     multibyte sequences 3. RTL scripts 4. CJK 5. emoji surrogate ranges 6.

@@ -1,9 +1,15 @@
 open Chat
-open Lwt.Infix
 module F = Frame
 module FR = Frame_reader
 
-type pipe = {
+let target_ack_substr = "ack:#"
+let target_client_disconn_substr = "client disconnected"
+let target_quit_on_no_chat = "currently not in any chat"
+let target_when_client_graceful_term = "disconnected"
+let target_server_shutting_down = "shutting down"
+let default_in = "«💙❤️Més que un club❤️💙»"
+
+type test_pipe = {
   rd : Lwt_io.input_channel;
   wr : Lwt_io.output_channel;
   fd_rd : Lwt_unix.file_descr;
@@ -11,13 +17,24 @@ type pipe = {
 }
 (** A named channel pair, write to [wr], read from [rd]. *)
 
-(** NOTE: idempotent closing, TODO[REFACTOR] consider this pattern for main
-    logic fd closers *)
+(** EOF when the write fd is closed *)
+let sim_peer_eof p = Lwt_unix.close p.fd_wr
+
+let timed timeout thunk =
+  try%lwt Lwt_unix.with_timeout timeout thunk
+  with Lwt_unix.Timeout -> Alcotest.failf "Test timed out after %.1fs" timeout
+
+let with_timeout ?(secs = 2.0) thunk =
+  let timeout =
+    let%lwt () = Lwt_unix.sleep secs in
+    Alcotest.failf "test timed out after %.1fs" secs
+  in
+  Lwt.pick [ thunk (); timeout ]
+
 let make_pipe_with_switch switch =
   let fd_rd, fd_wr = Lwt_unix.pipe () in
   let rd = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.input fd_rd in
   let wr = Lwt_io.of_fd ~close:Lwt.return ~mode:Lwt_io.output fd_wr in
-
   let safe_close_ch ch =
     Lwt.catch (fun () -> Lwt_io.close ch) (fun _ -> Lwt.return_unit)
   in
@@ -32,16 +49,17 @@ let make_pipe_with_switch switch =
   in
 
   let fini () =
-    safe_close_ch wr >>= fun () ->
-    safe_close_ch rd >>= fun () ->
-    safe_close_fd fd_wr >>= fun () -> safe_close_fd fd_rd
+    let%lwt () = safe_close_ch wr in
+    let%lwt () = safe_close_ch rd in
+    let%lwt () = safe_close_fd fd_wr in
+    safe_close_fd fd_rd
   in
 
   Lwt_switch.add_hook (Some switch) fini;
   { rd; wr; fd_rd; fd_wr }
 
 type capture_spy = {
-  pipe : pipe;
+  pipe : test_pipe;
   lines : string list ref;
   capture_task : unit Lwt.t;
 }
@@ -88,7 +106,7 @@ let make_raw_frame_bs typ id payload =
   frame_bs
 
 let write_raw oc bs =
-  Lwt_io.write_from_exactly oc bs 0 (Bytes.length bs) >>= fun () ->
+  let%lwt () = Lwt_io.write_from_exactly oc bs 0 (Bytes.length bs) in
   Lwt_io.flush oc
 
 let write_frame oc frame = write_raw oc (F.to_bytes frame)

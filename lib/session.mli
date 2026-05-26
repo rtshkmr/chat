@@ -42,11 +42,11 @@ val create :
 
 val meta_of_opt : t -> Session_meta.t option
 
-val set_callbacks : t -> console_callbacks -> t
+val set_callbacks : t -> console_callbacks -> unit
 (** Hydrates the session by setting the console-specific callbacks that the
-    session needs to have access to.*)
+    session needs to have access to. This is entirely effectful.*)
 
-val unset_callbacks : t -> t
+val unset_callbacks : t -> unit
 
 val shutdown : t -> unit Lwt.t
 (** Closes a chat session gracefully *)

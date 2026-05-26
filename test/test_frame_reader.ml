@@ -3,9 +3,10 @@ open Alcotest
 module F = Chat.Frame
 module FR = Chat.Frame_reader
 module In = Helpers.Test_input
+module In_typ = Helpers.Input_types
 module ALWT = Alcotest_lwt
 
-let streaming_test_case_inputs : In.freader_streaming_input list =
+let streaming_test_case_inputs : In_typ.freader_streaming_input list =
   [
     (* Single-frame: basic reads *)
     {
@@ -41,7 +42,8 @@ let streaming_test_case_inputs : In.freader_streaming_input list =
     };
   ]
 
-let make_streaming_tc ({ name; frames; intent } : In.freader_streaming_input) =
+let make_streaming_tc
+    ({ name; frames; intent } : In_typ.freader_streaming_input) =
   ALWT.test_case name `Quick (fun switch () ->
       let { rd = pipe_ic; wr = pipe_oc; _ } = make_pipe_with_switch switch in
       let reader = FR.create pipe_ic in
@@ -65,7 +67,7 @@ let test_happy_streaming_tests =
   List.map make_streaming_tc streaming_test_case_inputs
 
 let make_edge_case_tc
-    ({ name; frame; check_frame } : In.freader_edge_case_input) =
+    ({ name; frame; check_frame } : In_typ.freader_edge_case_input) =
   ALWT.test_case name `Quick (fun switch () ->
       let { rd = pipe_ic; wr = pipe_oc; _ } = make_pipe_with_switch switch in
       let reader = FR.create pipe_ic in
@@ -77,7 +79,7 @@ let make_edge_case_tc
       | Ok rcvd_frame -> check_frame rcvd_frame
       | Error e -> failf "Expected frame, got error: %a" FR.pp_error e)
 
-let edge_case_test_inputs : In.freader_edge_case_input list =
+let edge_case_test_inputs : In_typ.freader_edge_case_input list =
   [
     {
       name = "Ack frame (zero payload)";
@@ -117,8 +119,7 @@ let edge_case_test_inputs : In.freader_edge_case_input list =
 let test_edge_cases_zero_payload_tests =
   List.map make_edge_case_tc edge_case_test_inputs
 
-let make_connection_loss_tc
-    ({ name; init; check_error } : In.freader_conn_loss_input) =
+let make_connection_loss_tc { In_typ.name; init; check_error } =
   ALWT.test_case name `Quick (fun switch () ->
       let { rd = pipe_ic; wr = pipe_oc; fd_wr; _ } =
         make_pipe_with_switch switch
@@ -135,7 +136,7 @@ let make_connection_loss_tc
           fail (Printf.sprintf "Expected error, got Ok. Test intent: %s" name)
       | Error e -> check_error e)
 
-let connection_loss_test_inputs : In.freader_conn_loss_input list =
+let connection_loss_test_inputs : In_typ.freader_conn_loss_input list =
   [
     {
       name = "EOF before any bytes sent → Connection_lost";
@@ -187,7 +188,7 @@ let test_conn_loss_eof_tests =
   List.map make_connection_loss_tc connection_loss_test_inputs
 
 let make_protocol_error_tc
-    ({ name; frame_bytes; expect_error } : In.freader_protocol_input) =
+    ({ name; frame_bytes; expect_error } : In_typ.freader_protocol_input) =
   ALWT.test_case name `Quick (fun switch () ->
       let { rd = pipe_ic; wr = pipe_oc; _ } = make_pipe_with_switch switch in
       let reader = FR.create pipe_ic in
@@ -200,7 +201,7 @@ let make_protocol_error_tc
       | Error (FR.Connection_lost msg) ->
           failf "Expected Protocol_error, got Connection_lost: %s" msg)
 
-let protocol_error_test_inputs : In.freader_protocol_input list =
+let protocol_error_test_inputs : In_typ.freader_protocol_input list =
   [
     {
       name = "Unknown frame type (0xFF)";

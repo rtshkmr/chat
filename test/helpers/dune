@@ -2,7 +2,7 @@
  (name helpers)
  (flags
   (-w +a-40-42-70 -warn-error +a-40-42-70))
- (modules test_helpers test_input e2e_harness)
+ (modules test_helpers test_input e2e_harness input_types)
  (libraries chat alcotest alcotest-lwt lwt lwt.unix)
  (preprocess
   (pps lwt_ppx)))

@@ -7,7 +7,7 @@ description:
 maintainer: ["Ritesh <hello@rtshkmr.com>"]
 authors: ["Ritesh Kumar <hello@rtshkmr.com>"]
 license: "GPL-3.0-only"
-tags: ["add topics" "to describe" "your" "project"]
+tags: ["chat" "ocaml" "lwt" "tcp"]
 homepage: "https://codeberg.org/rtshkmr/chat"
 doc: "https://url/to/documentation"
 bug-reports: "https://codeberg.org/rtshkmr/chat/issues"
@@ -15,9 +15,12 @@ depends: [
   "dune" {>= "3.22"}
   "ocaml"
   "lwt"
+  "lwt_ppx"
   "logs"
+  "fmt"
   "cmdliner"
   "alcotest" {with-test}
+  "alcotest-lwt" {with-test}
   "ocaml-lsp-server" {with-dev}
   "merlin" {with-dev}
   "ocamlformat" {with-dev}

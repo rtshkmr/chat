@@ -1,0 +1,416 @@
+* Testing Architecture: Patterns, Rationale, and the Refactors Behind Them
+
+Some of the patterns documented here were discovered, unfortunately through the friction experienced when attempting to write good e2e tests that were not flaky. These discoveries kickstarted massive refactoring efforts at trying to simplify the code and improve testability (and the many commits in the git history [and many more squashed]).
+
+<I tried to editorialise this to make it easier to read; both docs/progress_notes.org and docs/testing_notes.org were scratch buffers to pour thoughts into formatively as I did this assignment; emacs giveth [depth of docs] but emacs also taketh [brevity] 🫡>
+
+** 1. Unit Testing: Test Generators, Input Types, and the Data/Logic Split
+
+The objective here is mainly to do property testing $\implies$ higher volume of cases.
+
+*** 1.1 The Core Pattern: Separate Data from Mechanics
+
+The =Frame= and =Frame_reader= tests follow a deliberate three-layer structure:
+
+- =input_types.ml=: Defines the /shape/ of test input as record types, a pure data-structure layer.
+- =test_input.ml=: Provides the /actual data/, the enumerated cases. Bots were useful for this.
+- =test_*.ml=: Contains /generator functions/ that turn one record into one test case, and then maps those generators over the data lists.
+
+*The payoff*: Imagination for edge cases is the main thing for property tests, the corpus of bots is larger than my experience -- so it's better to just give it a shape and mould and ask it to generate. This is a value of AI-tooling that anyone can agree with: test generation / enumeration beyond my capabilities (*pre-requisite* being that /the human knows what's happening/ e.g. how does cursor movement happen on RTL-languages like arabic? [[https://www.unicode.org/reports/tr9/][ref]])
+
+*** 1.2 Testable Types and Pretty-Printers
+Writing pretty-printers proved useful for plugging into other tools (alcotest). This forced =Frame.pp= and =Frame_reader.pp_error= to exist as =Format.formatter=-based functions:
+
+#+caption: easy testable creation using a pp
+#+begin_src ocaml
+let frame_testable =
+  let is_equal a b = F.to_bytes a = F.to_bytes b in
+  Alcotest.testable F.pp is_equal
+
+let frame_error_testable = Alcotest.testable F.pp_error ( = )
+#+end_src
+
+*Structural equality* on frames via their *serialised byte representation is a strong property*: it tests the codec symmetry (serialise then deserialise is identity) as a side-effect of every frame comparison.
+
+There was a large refactor done after the decision to use =Format.formatter=-based printers (instead of returning strings) was made for the same reason the OCaml ecosystem uses them:
+
+Late binding means:
+  a) no intermediate string allocations,
+  b) natural nesting via =%a=,
+  c) composability when error types become nested.
+
+** 2. Session Unit Tests: Testing a Concurrent Stateful System in Isolation
+
+Initially, it felt like session (and console) needed harnesses that felt too much like setting up e2e harnesses. This was the most frustrating source of friction that demanded the exit-types refactor.
+
+Some notes about it:
+
+*** 2.1 The =make_session= Helper: Simulated Network via Pipe
+
+#+caption: pipes!
+#+begin_src ocaml
+let make_session switch ?(callbacks = None) () =
+  let ({ rd = net_ic; wr = net_oc; _ } as p) = make_pipe_with_switch switch in
+  let session = S.create ~ic:net_ic ~oc:Lwt_io.null ~callbacks () in
+  (session, net_oc, p)
+#+end_src
+
+The session writes its outgoing protocol frames to =Lwt_io.null= (discarded). The test feeds frames to the session by writing to =net_oc= (the write end of the pipe that backs =net_ic=).
+
+This pattern was helpful to:
+ 1. Tests only the /receive/ path without needing a real network peer --- network isolation
+    - also, =Lwt_io.null= avoids frame validation noise on the transmit side
+ 2. The =switch= provided by Aloctest handles cleanup of the pipe automatically
+
+*** 2.2 Typed Exit Reasons Enable Precise Assertions
+
+After refactoring =Session= to raise *typed exceptions* instead of returning =unit=, testing got easier:
+
+#+caption: Since the service loop (session run) gives reasons for why it stopped, it's easier to test various cases, such as loss of connection here
+#+begin_src ocaml
+try%lwt
+  let%lwt () = sim_peer_eof pipe in
+  let%lwt () = S.run session in
+  Alcotest.failf "expected Session_exit (Lost_conn), got unit"
+with
+| S.Session_exit (S.Lost_conn _) -> Lwt.return_unit
+| S.Session_exit other ->
+    Alcotest.failf "wrong exit_reason: %a" S.pp_exit_reason other
+#+end_src
+
+Before typed exits, the only assertion possible was "session returned unit", that's why it felt like there was /not much difference between setting up e2e harnesses and this/.
+
+Also, that capability was insufficient: a session returning unit after a protocol error looks identical to a session returning unit after a clean close.
+
+So, the main learning here is that *Typed exits help signal exit intent*.
+
+*** 2.3 Callbacks Simplified to a Single =on_rx= Dispatcher
+
+Dependency Injection is magical. From the beginning, this was part of the interface-design and here's a useful example for test-writing:
+
+#+caption: Provide custom accumulators instead of needing to write spies or mocks for structs
+#+begin_src ocaml
+type rx_event = Msg_received of ... | Ack_received of ... | Peer_closed | Spurious_ack of ...
+
+let on_rx ev = dispatched := ev :: !dispatched; Lwt.return_unit
+let callbacks = Some { S.on_rx }
+#+end_src
+
+What's happening here is that in the actual code, the callback passed in is meaningful, but we can shim it for our testing needs. :
+   1. The event list =dispatched= can be pattern-matched in assertions without needing three separate mutable refs. e.g. the test for =Spurious_ack= checks whether the event was dispatched and whether session continued running;  both from a single event list inspection.
+
+#+caption: A full test showing a custom callback to accumulate event emission stats for the test
+#+begin_src ocaml -n
+let test_msg_received_fires_callback =
+  ALWT.test_case "Msg frame fires on_rx with correct Msg_received payload"
+    `Quick (fun switch () ->
+      let received : S.rx_event list ref = ref [] in
+      (* collects emitted events *)
+      let on_rx ev =
+        received := ev :: !received;
+        Lwt.return_unit
+      in
+      let session, client_oc =
+        make_session switch ~callbacks:(Some { S.on_rx }) ()
+      in
+      let payload = "🔥fireball🔥" in
+      let%lwt () = msg ~id:42l payload |> write_frame client_oc in
+      let%lwt () = close_frame |> write_frame client_oc in
+      let%lwt () = S.run session in
+      let found =
+        List.find_opt
+          (function S.Msg_received _ -> true | _ -> false)
+          !received
+      in
+      match found with
+      | None -> Alcotest.failf "Msg_received event never emitted"
+      | Some (S.Msg_received r) ->
+          Alcotest.(check int32) "id" 42l r.id;
+          Alcotest.(check string) "payload" payload (Bytes.to_string r.content);
+          Lwt.return_unit
+      | Some _ -> assert false)
+#+end_src
+
+** 3. The E2E Harness: Real Problems in the Real World (Wrangling Concurrency and Race Conditions)
+
+Since the e2e tests intended to run a real server and real client over loopback TCP, we're at the mercy of real concurrency elements (OS scheduler, TCP stack, Lwt cooperative scheduler...).
+
+Most of the effort for writing this testing harness went towards trying to fight flakiness due to this (which oddly improved the code in numerous minor ways too).
+
+*** 3.1 Structural Sequencing Eliminates the Socket Readiness Race
+
+#+caption: There's no cooperation needed @ setup here, keeping things sequential here
+#+begin_src ocaml
+let setup_e2e_components switch =
+  let%lwt server, port = spawn_server switch in   (* binds FIRST *)
+  let%lwt client = spawn_client switch ~port in   (* connects AFTER *)
+  Lwt.return { server; client; port }
+#+end_src
+
+Two takeaways from this:
+  1. the problem of syncronising / readiness checking discipline only exists if we spawn these components concurrently. Sequentially doing it guarantees that a bind + listen call would be complete before creating client
+  2. Port 0 use is helpful to let the OS give us available ports without confilicts, helps to spawn many test cases (even in parallel). Assigned port gets extracted via =getsockname= within the test harness, after binding.
+
+     #+caption: retrieving automagically given port, example
+     #+begin_src ocaml
+let assigned_port =
+  match Lwt_unix.getsockname server_socket with
+  | Unix.ADDR_INET (_, p) -> p
+  | _ -> failwith "unexpected"
+     #+end_src
+
+*** 3.2 =assert_connected=: Connectivity Assertion, Readiness Barrier
+
+I used a two-phase setup because of the interoperation between session and console. That's why there's a binding routine between them. This creates a race condition regardless:
+    * Server's TCP accept has returned
+    * =Console.bind_session= might not have been fired yet
+
+So, a test that wants to write to the client terminal at that period will end up throwing that programmer exn that complains that session callbacks aren't registered.
+
+So =assert_connected= works as a readiness barrier by literally doing a ping-pong test.
+
+#+caption: ping-pong
+#+begin_src ocaml
+let assert_connected env =
+  let%lwt () = type_as_client env "ping" in
+  let%lwt () = verify_line_displayed_by_server env "ping" in  (* blocks until message arrived *)
+  let%lwt () = verify_line_displayed_by_client env target_ack_substr in
+  let%lwt () = type_as_server env "pong" in
+  let%lwt () = verify_line_displayed_by_client env "pong" in
+  let%lwt () = verify_line_displayed_by_server env target_ack_substr in
+  Lwt.return_unit
+#+end_src
+
+By the time =assert_connected= returns, we know:
+1. TCP connection is established (message traversed the network)
+2. Both sessions have callbacks registered (message was dispatched)
+3. Both directions work (bidirectional proof)
+4. ACK path works (RTT tracking initialized correctly)
+5. We are ready to do any other meaningful test now that this is proven.
+
+*** 3.3 =wait_for_output=: Poll-With-Timeout as the Assertion Primitive
+
+#+caption: Poll with Timeout
+#+begin_src ocaml
+let wait_for_output ?(timeout = 2.0) cap predicate =
+  let rec poll_loop () =
+    if predicate !(cap.lines) then Lwt.return_unit
+    else
+      let%lwt () = Lwt_unix.sleep 0.01 in
+      poll_loop ()
+  in
+  let timeout_task () =
+    let%lwt () = Lwt_unix.sleep timeout in
+    Alcotest.failf "Timed out waiting for output. Captured lines: %s"
+      (String.concat "\n" !(cap.lines))
+  in
+  Lwt.pick [ poll_loop (); timeout_task () ]
+#+end_src
+
+ A fixed sleep (=Lwt_unix.sleep 0.1=)  means a static step duration, that would need tuning if it were actually something to deploy $\implies$ flaky under real load. Also could be tuned too slow.
+
+ Poll-with-timeout is idiomatic here: wakes up every 10ms and checks predicate... *=Lwt.pick= dictates the timeout structure*.
+
+*** 3.4 The Output Spy: Eager Start via Lwt Evaluation
+
+#+caption: I spy with my ref, a dandy line
+#+begin_src ocaml
+let make_output_spy switch =
+  let p = make_pipe_with_switch switch in
+  let lines = ref [] in
+
+  let rec read_and_capture_line_loop () =
+    let%lwt line = Lwt_io.read_line p.rd in
+    lines := line :: !lines;  (* prepend: most recent at head *)
+    read_and_capture_line_loop ()
+  in
+
+  let capture_task =
+    try%lwt read_and_capture_line_loop () with
+    | End_of_file | Lwt.Canceled | Lwt_io.Channel_closed _ -> Lwt.return_unit
+    | Unix.Unix_error _ -> Lwt.return_unit
+    | e -> Lwt.fail e
+  in
+  { pipe = p; lines; capture_task }
+#+end_src
+
+
+Some notes:
+  1. =capture_task= is eagerly evaluated at construction. So, the loops task, =read_and_capture_line_loop ()= call, runs immediately and suspends at =Lwt_io.read_line p.rd= (pipe is empty). At that point, =p.rd='s file descriptor is registered in Lwt's event loop. When data is written to =p.wr= and flushed, the event loop wakes up =capture_task=, which reads the line and appends to =lines=. $\implies$ no "start capturing" step. *The spy is live from the moment =make_output_spy= returns*.
+  2. *Switch-based lifecycle* fits the cleanup signal well: When the Alcotest switch fires (after every test case), =make_pipe_with_switch='s fini hook closes =p.fd_wr=. This causes EOF on =p.rd=, which causes =read_and_capture_line_loop= to raise =End_of_file=, which is caught and returns =unit=. =capture_task= is now resolved. Resources get managed!
+
+*** 3.5 The =timed= Wrapper: Timeout as a Test-Level Invariant
+
+#+begin_src ocaml
+let timed timeout thunk =
+  try%lwt Lwt_unix.with_timeout timeout thunk
+  with Lwt_unix.Timeout -> Alcotest.failf "Test timed out after %.1fs" timeout
+#+end_src
+
+Continuing the effort to make e2e testing less flaky, every e2e test is wrapped in =timed=. It is a /deadlock detector/. Since the e2e harness involves concurrent Lwt promises reading from pipes, *any blocking call that does not yield to the scheduler will hang*. =Lwt_unix.with_timeout= wraps the test in a timer that fires even if Lwt is busy, converting a hung test into a clean failure.
+
+*Two timeout bands* for tuning durations: =short = 1.5= for single round-trips and =medium = 3.0= for multi-step scenarios (reconnect, multi-session). If this were an actual system, then that's something to tune for whatever setup desired.
+
+*** 3.6 Teardown Discipline: RAII via the Alcotest Switch
+
+Continuing on from before about switches... the Alcotest switch fires after every test case. All resources (pipes, file descriptors, server sockets) are registered with the switch:
+
+#+caption: And we wait for the switched to be turned off to do things
+#+begin_src ocaml
+let make_pipe_with_switch switch =
+  ...
+  let fini () =
+    safe_close_ch wr >>= safe_close_ch rd >>= safe_close_fd fd_wr >>= safe_close_fd fd_rd
+  in
+  Lwt_switch.add_hook (Some switch) fini;
+  { rd; wr; fd_rd; fd_wr }
+#+end_src
+
+*The creator-is-destroyer principle*: Just like in the main business logic, resources are registered for cleanup at creation time, not at teardown time. The test writer does not need to remember to free anything, Alcotest-lwt's switch will handle it. The switch is the single authority for cleanup logic for tests.
+
+#+caption:
+#+begin_src ocaml
+let teardown_server env =
+  let%lwt () = safe_close_fd env.server.terminal_in.fd_wr in  (* signals EOF *)
+  Lwt.pick [ env.server.task; (Lwt_unix.sleep 2.0 >>= fun () -> Alcotest.failf "...") ]
+
+let teardown_e2e env = Lwt.join [ teardown_client env; teardown_server env ]
+#+end_src
+
+=safe_close_fd= vs =Lwt_io.close=: Channels created with =~close:Lwt.return= only flush on =Lwt_io.close= because the on-close is a noop (that's what I wanted), so they do not close the underlying fd. To signal EOF to the other end of a pipe, we must close the fd directly. This distinction caused a significant class of test bugs before it was understood by me.
+
+*** 3.7 The =e2e_env= as a Mutable Reference via Record Update
+
+For multi-session tests, the client changes but the server stays the same:
+
+#+caption: they come and they go
+#+begin_src ocaml
+let%lwt client2 = spawn_client switch ~port:env.port in
+let updated_env = { env with client = client2 } in
+let%lwt () = type_as_client updated_env "Hello, I'm client 2" in
+let%lwt () = verify_line_displayed_by_server updated_env c2_msg in
+#+end_src
+
+The =env= is an immutable record. Instead of mutating it, a new env is created with =client= replaced. This keeps the server's =terminal_out= spy intact (it accumulates all lines across sessions), while the client is a fresh actor.
+
+** 4. The Refactors That Made Testing Possible
+
+Every significant test design decision was preceded by a business code refactor that removed an obstacle. These are documented here so the causal chain is clear.
+
+There's a causal chain of test design decisions because they mostly necessitated refactors of the main code. Refactors:
+
+*** 4.1 Typed Exit Reasons: From Void to Structured Errors
+
+Previously, =Session.run= returned =unit Lwt.t=. Any error caused a log line and a =unit= return. The test could only assert the presense / absence of a crash.
+
+*now*: Service loops raise typed exceptions that give meaning to the caller:
+
+#+caption: what is the reason for exiting
+#+begin_src ocaml
+exception Session_exit of exit_reason
+exception Session_invariant_violated of string
+
+type exit_reason =
+  | Lost_conn of string
+  | Protocol_error of Frame.error
+  | Clean_close
+  | Peer_terminated
+#+end_src
+
+
+This helped the most to make the code testable and specific:
+  - EOF on read  $\implies$  =Lost_conn= (not a crash, not a protocol error)
+  - Unknown frame type $\implies$ =Protocol_error= (specific variant)
+  - Missing callbacks when session receives data $\implies$ =Session_invariant_violated= (programmer error, should not recover)
+
+*Footnote on programmer errors vs runtime errors*: =Session_invariant_violated= fails loudly and ignores / is ignored by (not in control of/by) the harness.
+
+*** 4.2 RAII Resource Ownership: Callbacks Removed
+
+Previously, the harness (=Server=, =Client=) passed an =on_fini= callback into =Session.create=. When the session exited, it called =on_fini= to close the TCP socket. The callback inverted control: the service (session) was triggering cleanup of resources it did not create. The intention was that the first-witness to the problem should do the reporting (like a fire), but that doesn't hold water.
+
+Issues posed by this approach:
+  * *doublekills / doublecloses*: If a session propagates an exception, the =Lwt.finalize= callback fires but may try to close a channel that's already been closed by the harness (=Lwt_io.Channel_closed=)
+  * The test harness was caught between the session's cleanup and its own cleanup
+
+now: Session raises a typed exit reason. The harness (which created the socket) catches the exception and performs cleanup:
+
+#+caption: pattern
+#+begin_quote
+Service-loops raise. Harnesses catch and own resource cleanup.
+#+end_quote
+
+Benefits:
+  * session no longer holds a reference to resources it didn't create.
+  * deterministic cleanup order:  harness cleanup only fires after the exception has propagated up through the normal exception-handling path.
+
+*** 4.3 =handle_sigint= Must Be a Function, Not a Module-Level Value
+
+*The bug*: =handle_sigint= was a module-level value:
+
+#+begin_src ocaml
+let handle_sigint =
+  let sigint_cond = Lwt_condition.create () in
+  ...
+  Lwt_condition.wait sigint_cond  (* single shared promise, created once *)
+#+end_src
+
+
+*Failure mode*:
+
+It was a shared promise singleton that made no sense because multiple actors would touch it.  On cancelling / broadcasting, it would typically be premature or broadcast to foreign actors that didn't need that signal. Extremely annoying for test-writing-logic verification...
+
+*The fix*:
+
+I won't fix it. I'll omit Ctrl-C sighandler installation and ship it. The correct behaviour is there anyway and the teardown will work as determined anyway even without doing this.
+
+(The real takeaway is to not be silly and use module-level handlers that are so promiscuous because they are singletons.)
+
+*** 4.4 The Listener Pattern: Killed for Direct Dispatch
+
+Console dispatched user events through a dynamic listener list (early use of broad patterns is a bad act done in good faith). Binding a session registered listeners -- the session send-message path was a function stored in a list and invoked on each =Send_msg= event.
+
+*Problem it createdfor testing*:
+
+Dynamic registration timing introduced a window between =Console.create= and =Console.bind_session= where a =Send_msg= event would be silently dropped (no listener registered yet). This was a real source of flakiness in early harness versions. Frustrating.
+
+*How this was avoided*:
+
+Direct, static, dispatch table. Console has a single =dispatch_event= function that pattern-matches on the current session state:
+
+#+caption: beautiful
+#+begin_src ocaml
+let dispatch_event t = function
+  | Send_msg bs when Option.is_some t.session ->
+      let sess = Option.get t.session in
+      Session.send_message sess bs
+  | Send_msg _ -> (* no session: display "not in chat" message *)
+  | User_close -> maybe_shutdown_session t
+  | User_exit -> ...
+  | Slash_cmd cmd -> handle_slash t cmd
+#+end_src
+
+This eliminated the registration timing window so that  the test harness no longer needs to worry about whether listeners were registered.
+
+** 5. Alcotest-specific Patterns and Quirks
+
+I had to pick up alcotest as a tool at the beginning of this task.
+
+*** 5.1 Stdout Capture: Alcotest Only Shows Output on Failure
+
+Alcotest captures stdout per test case and only shows it if the test fails. This is by design and makes the pass output clean. Consequence: all debug =printl= calls are invisible during normal runs.
+
+*** 5.2 Learning:  =switch= From Alcotest is Sufficient, No Custom Switch Needed
+That switch fires after each test so threading it will give the signal for end-of-test.
+
+An early harness version created a separate =tc_switch = Lwt_switch.create ()= inside each test. This was unnecessary and caused confusion because the custom switch was never explicitly turned off. The Alcotest switch is the correct owner of that.
+
+** 6. Patterns That Remain Incomplete or Risky
+
+There's some remnants of chaos in the code still.
+
+*** 6.1 The Burst and Simultaneous Tests Are Possibly Flaky
+
+=test_simultaneous_sends_no_deadlock= and =test_burst_messages_all_delivered= are marked with =NOTE [TEST] POSSIBLE FLAKY TEST= in comments.
+
+The possible reason is that =Lwt.both= fires two writes into the cooperative scheduler, but Lwt's cooperative model likely means one side may complete before the other even starts. The test is not strictly testing /simultaneous/ sends; it is supposed to be testing /non-deadlocking/ sequential sends close in time.

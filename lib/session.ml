@@ -4,6 +4,7 @@ module F = Frame
 module FR = Frame_reader
 
 type exit_reason =
+  (* DEPRECATED: this can likely be removed, I'm okay with merging it with Lost_conn *)
   | Peer_disconnected  (** Received Close frame: clean, expected termination. *)
   | Lost_conn of string  (** EOF/ECONNRESET: peer gone without a Close frame. *)
   | Broken_pipe  (** EPIPE on tx — we tried to write to a dead socket. *)
@@ -61,14 +62,8 @@ let create ~ic ~oc ?(callbacks = None) ?(conn_sock = None) () =
   }
 
 let meta_of_opt t = t.meta
-
-let set_callbacks t cbs =
-  t.callbacks := Some cbs;
-  t
-
-let unset_callbacks t =
-  t.callbacks := None;
-  t
+let set_callbacks t cbs = t.callbacks := Some cbs
+let unset_callbacks t = t.callbacks := None
 
 let tx_frame { oc; _ } f =
   let bs = f |> F.to_bytes in
@@ -106,41 +101,17 @@ let get_cbs_exn { callbacks; _ } =
       raise exn
   | Some cbs -> cbs
 
-(* TODO: [REFACTOR, TEST] <render cb> -- this function is ugly, can avoid materialising and make this faster. Also should likely just be converted to pretty printers *)
-let maybe_display_pending_acks { state = { pending_acks; _ }; _ } =
-  let num_pending = Hashtbl.length pending_acks in
-  if num_pending = 0 then Lwt.return_unit
-  else
-    let%lwt () =
-      Lwt_io.printl
-        "Terminating this chat session before all sent msgs have been ack-ed."
-    in
-    (* print header first *)
-    let%lwt () = Lwt_io.printlf "%d Pending Acks for:" num_pending in
-    (* print each entry directly *)
-    Hashtbl.fold
-      (fun msg_id time acc ->
-        acc >>= fun () ->
-        Lwt_io.printl (Printf.sprintf "Msg %ld sent at %.3f" msg_id time))
-      pending_acks Lwt.return_unit
-[@@warning "-32"]
-(* TODO [REFACTOR, TEST]  <render cb> figure out the displayign callback needs *)
-
 let send_ack t id = F.Ack { id } |> tx_frame t
 let send_close t = F.Close |> tx_frame t
 
+let pp_session_exit_reason fmt reason =
+  let now = Unix.gettimeofday () in
+  Format.fprintf fmt "%a %a" D.pp_prompt now pp_exit_reason reason
+
 let shutdown t =
-  let%lwt () = send_close t in
+  let%lwt () = try%lwt send_close t with _ -> Lwt.return_unit in
   Lwt_condition.signal t.shutdown_cond ();
   Lwt.return_unit
-
-(* TODO:[POLISH] make this display useful goodbye after chat_meta is up *)
-(* let fini _t = *)
-(* let now = Unix.gettimeofday () in *)
-(* let msg = Format.asprintf "◎ %a <session> shutting down" D.pp_prompt now in *)
-(* try%lwt Lwt_io.eprintl msg with _ -> Lwt.return_unit *)
-(* TODO [REFACTOR, TEST]  <render cb> figure out the displayign callback needs *)
-(* TODO: STUB: wrong channel, pass it via callback instead *)
 
 let on_peer_termination t =
   let rcvd_at = Unix.gettimeofday () in
@@ -165,16 +136,8 @@ let on_rcv_msg t id payload =
   let%lwt () = Msg_received { id; content = payload; rcvd_at } |> on_rx in
   send_ack t id
 
-let pp_session_exit_reason fmt reason =
-  let now = Unix.gettimeofday () in
-  Format.fprintf fmt "%a %a" D.pp_prompt now pp_exit_reason reason
-
 let rx_loop ({ frame_reader; _ } as t) =
-  let break_with reason =
-    let msg = Format.asprintf "%a" pp_session_exit_reason reason in
-    let%lwt () = Lwt_io.eprintf "%s\n" msg in
-    Lwt.fail (Session_exit reason)
-  in
+  let break_with reason = Lwt.fail (Session_exit reason) in
   let rec loop () =
     FR.read_frame frame_reader >>= function
     | Ok (F.Msg { id; payload }) -> on_rcv_msg t id payload >>= loop
@@ -198,7 +161,7 @@ let tx_loop ({ state = { msg_queue; _ }; _ } as t) =
 let await_shutdown_signal { shutdown_cond; _ } =
   Lwt_condition.wait shutdown_cond
 
-let handle_network_io t =
+let run t =
   let exit_with reason =
     let msg = Format.asprintf "%a" pp_session_exit_reason reason in
     let%lwt () = Lwt_io.eprintf "%s\n" msg in
@@ -212,10 +175,3 @@ let handle_network_io t =
   | e -> exit_with (Unexpected e)
 [@@warning "-4"]
 (* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)
-
-let run t = handle_network_io t
-(* TODO[CHAT-META,POLISH] after creating chat_meta, use that info to make this meaningful *)
-(* let%lwt () = Lwt_io.write_line t.oc "Running session..." in *)
-(* let handle_network_thunk () = handle_network_io t in *)
-(* let fini_thunk () = fini t in *)
-(* Lwt.finalize handle_network_thunk fini_thunk *)

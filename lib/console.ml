@@ -36,7 +36,25 @@ type t = {
   mutable session : S.t option;
 }
 
-let show_help t = Lwt_io.write_line t.oc "Commands: /quit, /help"
+let help_text =
+  {|
+===  ChatTCP  ===
+
+This is a 1:1 chat system over TCP/IP.
+
+COMMANDS:
+  /help    Show this message
+  /quit    Close chat session (server: waits for next client, client: exits app)
+  /exit    Exit the application immediately
+
+MODES:
+  Server:  Listens for incoming connections. Use /quit to close current chat, keep waiting.
+  Client:  Connects to server. Use /quit or /exit to close and exit.
+
+Just type a message to send it. Both sides auto-acknowledge delivery.
+|}
+
+let show_help t = Lwt_io.write_line t.oc help_text
 
 (** Console attempts to display exit msg, defensively in case the channel is
     already dead e.g. Channel_closed was the exit reason. This is a beset-effort
@@ -89,10 +107,10 @@ let make_console_callbacks t session =
   { S.on_rx }
 
 let bind_session t ~session =
-  let s = make_console_callbacks t session |> Session.set_callbacks session in
-  t.session <- Some s;
+  session |> make_console_callbacks t |> Session.set_callbacks session;
+  t.session <- Some session;
   let display () =
-    match S.meta_of_opt s with
+    match S.meta_of_opt session with
     | None -> Lwt.return_unit
     | Some m -> D.write_pp t.oc D.pp_banner m
   in
@@ -160,5 +178,5 @@ let run_console t =
 (* [@@warning "-32"] *)
 
 let run t =
-  let%lwt () = Lwt_io.write_line t.oc "Running console..." in
+  let%lwt () = show_help t in
   Lwt.finalize (fun () -> run_console t) (fun () -> fini t)

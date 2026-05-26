@@ -2,9 +2,10 @@ open Helpers.Test_helpers
 open Alcotest
 module F = Chat.Frame
 module In = Helpers.Test_input
+module In_typ = Helpers.Input_types
 module ALWT = Alcotest_lwt
 
-let make_legal_payload_test ({ desc; bytes; _ } : F.error option In.t) =
+let make_legal_payload_test ({ desc; bytes; _ } : F.error option In_typ.t) =
   let test_name = Printf.sprintf "supports %s payload" desc in
   ALWT.test_case_sync test_name `Quick (fun () ->
       match F.make_frame 1l bytes 0 with
@@ -15,7 +16,7 @@ let make_legal_payload_test ({ desc; bytes; _ } : F.error option In.t) =
             frame expected
       | Error e -> failf "make_frame failed for %s: %a" desc F.pp_error e)
 
-let make_test_codec_case ({ desc; bytes; err } : F.error In.t) =
+let make_test_codec_case ({ desc; bytes; err } : F.error In_typ.t) =
   let test_name = Printf.sprintf "rejects raw frame when %s" desc in
   ALWT.test_case_sync test_name `Quick (fun () ->
       match F.of_bytes bytes with

@@ -1,3 +1,58 @@
-#+title: A Simple 1:1 Chat
+#+title: ChatTCP: A simple 1:1 Chat over TCP
+
+
+*  Motivation
 
 This is my implementation for a take-home assignment from Ahrefs Pte. Ltd. for their OCaml Developer position.
+
+*  Quickstart
+
+** Prerequisites
+
+| what        | ver.                                          |
+|-------------+-----------------------------------------------|
+| OCaml, opam | 4.14+                                         |
+| OS          | tried on MacOS / ArchLinux; ymmv for the rest |
+|             |                                               |
+** Steps
+
+The most convient way is to use the Makefile targets:
+
+1. Setup and Installation:
+
+  #+caption: If it's a first time setup, (creates opam switch, installs deps)
+  #+begin_src zsh
+make setup && eval $(opam env)
+  #+end_src
+
+2. Build and install the executable (chat.exe)
+
+   #+begin_src zsh
+make build && make install
+   #+end_src
+
+3. Run the application (as server / client)
+   #+caption: run as server, supply custom args
+   #+begin_src zsh
+chat server
+# use chat server --help to see manpages
+   #+end_src
+
+   #+caption:separately, e.g. diff shell; run as client
+   #+begin_src zsh
+chat client
+   #+end_src
+
+4. Alternatively, run from the build directory without installing:
+   #+begin_src zsh
+# Terminal 1 (server)
+make server -- -p 5050 --bind 127.0.0.1
+
+# Terminal 2 (client)
+make client -- --host 127.0.0.1 -p 5050
+   #+end_src
+
+5. Use =/help= within the terminal application if needed
+   #+begin_src
+> /help
+   #+end_src

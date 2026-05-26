@@ -80,7 +80,7 @@ let run_client ~term ~net =
       let msg = Format.asprintf "[Console: %a]" Console.pp_error e in
       Lwt_io.eprintf "%s\n" msg
 
-let run ?(term = make_terminal_conf ()) ~(net : network_config) () =
+let run ?(term = make_terminal_conf ()) ~net () =
   let%lwt () = D.write_pp term.oc pp_event (Connecting (net.host, net.port)) in
   let exit_with err = D.eprintf_pp pp_error err in
   try%lwt run_client ~term ~net with
@@ -91,4 +91,3 @@ let run ?(term = make_terminal_conf ()) ~(net : network_config) () =
   | e -> exit_with (Unexpected e)
 [@@warning "-4"]
 (* Ignore warning 4: The fragile pattern match on [ Unix.error ] is fine because we only care about some of the error types*)
-(*-- TODO: [STUB] wire up log levels and conn timeout. timeout needs to be used so need auto-cancellations and all that *)

@@ -24,14 +24,17 @@
  (depends
   ocaml
   lwt
+  lwt_ppx
   logs
+  fmt
   cmdliner
   (alcotest :with-test)
+  (alcotest-lwt :with-test)
   (ocaml-lsp-server :with-dev)
   (merlin :with-dev)
   (ocamlformat :with-dev)
   (utop :with-dev))
  (tags
-  ("add topics" "to describe" your project)))
+  ("chat" "ocaml" "lwt" "tcp")))
 
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/reference/dune-project/index.html

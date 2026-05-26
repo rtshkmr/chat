@@ -4,13 +4,13 @@ open Test_helpers
 module S = Server
 module C = Client
 
-type peer = {
-  terminal_in : pipe;  (** test writes here → simulates typing *)
+type actor = {
+  terminal_in : test_pipe;  (** test writes here → simulates typing *)
   terminal_out : capture_spy;  (** test reads from here → captures display *)
   task : unit Lwt.t;  (** the running server/client Lwt task *)
 }
 
-type e2e_env = { server : peer; client : peer; port : int }
+type env = { server : actor; client : actor; port : int }
 
 (** Spawns a test server that will already start running, accepting connections
     as a bg-task.
@@ -34,7 +34,7 @@ let spawn_server switch =
     match Lwt_unix.getsockname server_socket with
     | Unix.ADDR_INET (_, p) -> p
     | _ -> failwith "unexpected address family"
-      (* it's alright, it's a test and we only care about this case*)
+      (* warning -4: it's alright, it's a test and we only care about this case*)
       [@@warning "-4"]
   in
   let net : S.network_config =
@@ -90,24 +90,30 @@ let setup_e2e_components switch =
 *)
 let wait_for_output ?(timeout = 2.0) cap predicate =
   let rec poll_loop () =
-    (* let%lwt () = Lwt_io.printl "polling loop: wait for output" in *)
     if predicate !(cap.lines) then Lwt.return_unit
-    else Lwt_unix.sleep 0.01 >>= poll_loop
+    else
+      let%lwt () = Lwt_unix.sleep 0.01 in
+      poll_loop ()
   in
   let timeout_task () =
-    Lwt_unix.sleep timeout >>= fun () ->
+    let%lwt () = Lwt_unix.sleep timeout in
     Alcotest.failf "Timed out waiting for output. Captured lines: %s"
       (String.concat "\n" !(cap.lines))
   in
   Lwt.pick [ poll_loop (); timeout_task () ]
 
-(* TODO [REFACTOR]: make this efficient, the recent msg will be at head of lines, we can just check that *)
-let has_line_containing s lines =
-  let is_substring ~substring s =
-    let pattern = substring |> Re.str |> Re.compile in
-    Re.execp pattern s
+let line_contains ~substring line =
+  let pattern = substring |> Re.str |> Re.compile in
+  Re.execp pattern line
+
+let has_line_containing substring lines =
+  List.exists (line_contains ~substring) lines
+
+let has_at_least_n_lines_containing n target lines =
+  let count =
+    List.length (List.filter (line_contains ~substring:target) lines)
   in
-  List.exists (fun l -> is_substring l ~substring:s) lines
+  count >= n
 
 let type_as_client env line = Lwt_io.write_line env.client.terminal_in.wr line
 
@@ -116,25 +122,22 @@ let verify_line_displayed_by_peer peer line =
 
 let verify_line_displayed_by_server env line =
   verify_line_displayed_by_peer env.server line
-(* wait_for_output env.server.terminal_out (has_line_containing line) *)
 
 let type_as_server env line = Lwt_io.write_line env.server.terminal_in.wr line
 
 let verify_line_displayed_by_client env line =
   verify_line_displayed_by_peer env.client line
-(* wait_for_output env.client.terminal_out (has_line_containing line) *)
 
 (** Client sends a probe (a sentinel msg) and then waits for server to display
-    it. This will confirm that they're connected and tests are ready to begin.
-
-    It's a ping-pong test. *)
+    it. Server does the same. This is a ping-pong test that will confirm that
+    they're connected and tests are ready to begin. *)
 let assert_connected env =
   let%lwt () = type_as_client env "ping" in
   let%lwt () = verify_line_displayed_by_server env "ping" in
-  let%lwt () = verify_line_displayed_by_client env "Acked" in
+  let%lwt () = verify_line_displayed_by_client env target_ack_substr in
   let%lwt () = type_as_server env "pong" in
   let%lwt () = verify_line_displayed_by_client env "pong" in
-  let%lwt () = verify_line_displayed_by_server env "Acked" in
+  let%lwt () = verify_line_displayed_by_server env target_ack_substr in
   Lwt.return_unit
 
 (** Gives an e2e test environment with correctly running server and client with
@@ -147,17 +150,6 @@ let setup_e2e switch =
   let%lwt env = setup_e2e_components switch in
   let%lwt () = assert_connected env in
   Lwt.return env
-
-(* (\** Signal both peers to close, await their tasks, then turn off the switch. *\) *)
-(* let teardown_e2e env = *)
-(*   let cooldown = 1.0 in *)
-(*   let safe_close_fd fd = *)
-(*     try%lwt Lwt_unix.close fd with _ -> Lwt.return_unit *)
-(*   in *)
-(*   let%lwt () = safe_close_fd env.client.terminal_in.fd_wr in *)
-(*   let%lwt () = safe_close_fd env.server.terminal_in.fd_wr in *)
-(*   Lwt.pick *)
-(*     [ Lwt.join [ env.server.task; env.client.task ]; Lwt_unix.sleep cooldown ] *)
 
 let safe_close_fd fd = try%lwt Lwt_unix.close fd with _ -> Lwt.return_unit
 
@@ -180,37 +172,6 @@ let teardown_client env =
   Lwt.pick [ env.client.task; timeout_task () ]
 
 let teardown_e2e env = Lwt.join [ teardown_client env; teardown_server env ]
-(* (\* Signals both peers to shut down via EOF on their terminal input *\) *)
-(* let%lwt () = safe_close_fd env.client.terminal_in.fd_wr in *)
-(* let%lwt () = safe_close_fd env.server.terminal_in.fd_wr in *)
-(* let timeout_task () = *)
-(*   let cooldown = 2.0 in *)
-(*   let%lwt () = Lwt_unix.sleep cooldown in *)
-(*   Alcotest.failf "Teardown timed out" *)
-(* in *)
-
-(* Lwt.pick [ Lwt.pick [ env.server.task; env.client.task ]; timeout_task () ] *)
-
-let _teardown_e2e env =
-  (* Signals both peers to shut down via EOF on their terminal input *)
-  let%lwt () = safe_close_fd env.client.terminal_in.fd_wr in
-  let%lwt () = safe_close_fd env.server.terminal_in.fd_wr in
-  let timeout_task () =
-    let cooldown = 2.0 in
-    let%lwt () = Lwt_unix.sleep cooldown in
-    Alcotest.failf "Teardown timed out"
-  in
-
-  Lwt.pick [ Lwt.pick [ env.server.task; env.client.task ]; timeout_task () ]
-
-let timed timeout thunk =
-  try%lwt Lwt_unix.with_timeout timeout thunk
-  with Lwt_unix.Timeout -> Alcotest.failf "Test timed out after %.1fs" timeout
-
-(** True when [cap.lines] contains at least [n] entries matching [target]. *)
-let has_at_least_n_lines_containing n target lines =
-  let count = List.length (List.filter (has_line_containing target) lines) in
-  count >= n
 
 (** Tear down a standalone [peer] that has no partner. Sends EOF to its terminal
     input and awaits the task with a guard timeout. *)
@@ -227,12 +188,6 @@ let close_client_channel_abruptly env =
   let%lwt () = Lwt_io.close env.client.terminal_out.pipe.wr in
   Lwt.return_unit
 
-(* let close_client_session_abruptly env = *)
-(*   (\* Kill the session socket, forcing channel closure *\) *)
-(*   let%lwt () = Lwt_unix.close env.client.sock in *)
-(*   Lwt.return_unit *)
-
-(* (\** Verify [needle] appears at least [n] times in [cap]'s output. *\) *)
-(* let verify_n_occurrences env_cap n needle = *)
-(*   wait_for_output env_cap *)
-(*     (has_at_least_n_lines_containing n needle) *)
+(** Verify [needle] appears at least [n] times in [cap]'s output. *)
+let verify_n_occurrences env_cap n needle =
+  wait_for_output env_cap (has_at_least_n_lines_containing n needle)
